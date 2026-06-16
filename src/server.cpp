@@ -62,36 +62,50 @@ static const char* PAGE_HEADER =
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
     "<title>%s</title>"
     "<style>"
+    ":root{--bg:#f6f4ef;--surface:#fffdf8;--surface-2:#fbf7ee;--ink:#1f2933;--muted:#667085;--line:#ded6c8;--brand:#2f5d62;--brand-2:#24484d;--accent:#b35f2a;--accent-soft:#f3dfc9;--info-soft:#e7f0ef;--shadow:0 10px 28px rgba(58,48,35,.08)}"
     "*{box-sizing:border-box;margin:0;padding:0}"
-    "body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5;color:#222}"
-    "header{background:#1a1a2e;color:#fff;padding:16px 24px}"
-    "header h1{font-size:1.3em}header h1 a{color:#fff;text-decoration:none}"
-    "header p{font-size:.85em;color:#aaa;margin-top:4px}"
-    ".container{max-width:1000px;margin:0 auto;padding:24px}"
-    ".search-bar{display:flex;gap:8px;margin:24px 0}"
-    ".search-bar input[type=text]{flex:1;padding:12px 16px;font-size:1em;border:2px solid #ddd;border-radius:8px}"
-    ".search-bar button{padding:12px 24px;background:#2563eb;color:#fff;border:none;border-radius:8px;font-size:1em;cursor:pointer}"
-    ".result-item{background:#fff;padding:16px 20px;margin:8px 0;border-radius:8px;border:1px solid #e5e7eb}"
-    ".result-item a{color:#2563eb;text-decoration:none;font-size:1.05em}"
-    ".result-item .meta{color:#6b7280;font-size:.85em;margin-top:4px}"
-    ".page-view{background:#fff;padding:24px;border-radius:8px;border:1px solid #e5e7eb;margin:16px 0}"
-    ".page-view h2{font-size:1.3em;margin-bottom:8px}"
-    ".page-meta{color:#6b7280;font-size:.85em;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid #e5e7eb}"
-    ".page-body{line-height:1.8;white-space:pre-wrap;word-break:break-word}"
-    ".notice{background:#fef3c7;border:1px solid #f59e0b;padding:12px 16px;border-radius:8px;margin:12px 0;color:#92400e}"
-    ".notice a{color:#92400e}"
-    ".stats{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0}"
-    ".stat-card{background:#fff;padding:16px 20px;border-radius:8px;border:1px solid #e5e7eb;text-align:center;min-width:120px}"
-    ".stat-card .number{font-size:1.5em;font-weight:bold;color:#2563eb}"
-    ".stat-card .label{font-size:.8em;color:#6b7280}"
-    ".nav-links{margin:12px 0}"
-    ".nav-links a{color:#2563eb;text-decoration:none;font-size:.9em}"
-    ".nav-links a:hover{text-decoration:underline}"
-    "footer{text-align:center;padding:32px;color:#9ca3af;font-size:.8em}"
-    ".badge{display:inline-block;padding:2px 8px;background:#dbeafe;color:#1e40af;border-radius:10px;font-size:.8em;margin-left:4px}"
+    "body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Noto Sans SC\",sans-serif;background:var(--bg);color:var(--ink);line-height:1.5}"
+    "body:before{content:\"\";position:fixed;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(255,253,248,.95),rgba(246,244,239,.72) 260px,rgba(246,244,239,0));z-index:-1}"
+    "header{background:var(--brand);color:#fff;border-bottom:4px solid var(--accent);padding:18px 24px}"
+    ".header-inner{max-width:1120px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:18px}"
+    "header h1{font-size:1.25rem;font-weight:750;letter-spacing:0}header h1 a{color:#fff;text-decoration:none}"
+    "header p{font-size:.86rem;color:#d7e5e2;margin-top:3px}"
+    ".system-badge{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;border:1px solid rgba(255,255,255,.26);background:rgba(255,255,255,.12);color:#edf7f5;border-radius:999px;padding:6px 10px;font-size:.78rem}"
+    ".container{max-width:1120px;margin:0 auto;padding:28px 24px 40px}"
+    "h2{font-size:1.45rem;line-height:1.25}h3{font-size:1rem;color:#344054;margin:18px 0 10px}"
+    "a{color:var(--brand);text-decoration:none}a:hover{text-decoration:underline}"
+    "code{background:var(--surface-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#5c3f20}"
+    ".search-bar{background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:14px;margin:22px 0}"
+    ".search-bar form{display:flex;gap:10px;width:100%%;align-items:stretch}"
+    ".search-bar input[type=text]{flex:1;min-width:0;padding:12px 14px;font-size:1rem;border:1px solid #cfc5b7;border-radius:6px;background:#fff;color:var(--ink);outline:none}"
+    ".search-bar input[type=text]:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(47,93,98,.16)}"
+    ".search-bar button{padding:0 20px;min-height:46px;background:var(--brand);color:#fff;border:none;border-radius:6px;font-size:.96rem;font-weight:650;cursor:pointer;white-space:nowrap}"
+    ".search-bar button:hover{background:var(--brand-2)}"
+    ".result-item{background:var(--surface);padding:15px 18px;margin:10px 0;border-radius:8px;border:1px solid var(--line);box-shadow:0 1px 0 rgba(58,48,35,.04)}"
+    ".result-item:hover{border-color:#c8b9a8;background:#fff}"
+    ".result-item a{font-size:1rem;font-weight:620;overflow-wrap:anywhere}"
+    ".result-item .meta,.meta{color:var(--muted);font-size:.86rem;margin-top:6px}"
+    ".page-view{background:var(--surface);padding:26px;border-radius:8px;border:1px solid var(--line);box-shadow:var(--shadow);margin:18px 0}"
+    ".page-view h2{margin-bottom:14px;overflow-wrap:anywhere}"
+    ".page-meta{display:grid;gap:8px;color:var(--muted);font-size:.9rem;margin-bottom:18px;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}"
+    ".page-meta div{overflow-wrap:anywhere}"
+    ".page-body{line-height:1.85;white-space:pre-wrap;word-break:break-word;font-size:1rem;color:#2b3036;padding-top:4px}"
+    ".notice{background:#fff7e8;border:1px solid #e7be82;padding:13px 15px;border-radius:8px;margin:14px 0;color:#7a4316;font-size:.92rem}"
+    ".notice a{color:#7a4316;font-weight:650}"
+    ".stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:16px 0 22px}"
+    ".stat-card{background:var(--surface);padding:16px;border-radius:8px;border:1px solid var(--line);box-shadow:0 1px 0 rgba(58,48,35,.04)}"
+    ".stat-card .number{font-size:1.35rem;line-height:1.2;font-weight:760;color:var(--brand);overflow-wrap:anywhere}"
+    ".stat-card .label{font-size:.8rem;color:var(--muted);margin-top:5px}"
+    ".nav-links{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 16px;color:#9b8c7b}"
+    ".nav-links a{display:inline-flex;align-items:center;border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:7px 10px;color:var(--brand);font-size:.9rem;font-weight:620}"
+    ".nav-links a:hover{background:var(--info-soft);text-decoration:none}"
+    "footer{text-align:center;padding:32px;color:#8b8175;font-size:.82rem}"
+    ".badge{display:inline-flex;align-items:center;padding:3px 8px;background:var(--info-soft);color:var(--brand-2);border:1px solid #c9dcd8;border-radius:999px;font-size:.78rem;font-weight:650;margin-left:6px;vertical-align:middle}"
+    "@media(max-width:720px){header{padding:16px}.header-inner{display:block}.system-badge{margin-top:10px}.container{padding:20px 14px 32px}.search-bar{padding:12px}.search-bar form{flex-direction:column}.search-bar button{width:100%%}.page-view{padding:18px}.stats{grid-template-columns:1fr 1fr}}"
+    "@media(max-width:420px){.stats{grid-template-columns:1fr}header h1{font-size:1.08rem}}"
     "</style></head><body>"
-    "<header><h1><a href=\"/\">🌐 Web InfoMall — 历史网页回放</a></h1>"
-    "<p>C++ Replay System · Phase 2</p></header><div class=\"container\">";
+    "<header><div class=\"header-inner\"><div><h1><a href=\"/\">Web InfoMall — 历史网页回放</a></h1>"
+    "<p>中国网页信息博物馆 · Archive Replay</p></div><span class=\"system-badge\">C++ Replay System · Phase 2</span></div></header><div class=\"container\">";
 
 static const char* PAGE_FOOTER =
     "</div><footer>Web InfoMall Archive Replay System · C++ Phase 2</footer></body></html>";
@@ -181,9 +195,9 @@ static std::string build_home(QueryEngine& qe) {
     std::string html(buf);
 
     // Search bar
-    html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\" style=\"display:flex;gap:8px;width:100%%\">"
+    html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
             "<input type=\"text\" name=\"q\" placeholder=\"输入 URL 或域名搜索...\" autofocus>"
-            "<button type=\"submit\">🔍 搜索</button></form></div>";
+            "<button type=\"submit\">搜索</button></form></div>";
 
     // Stats
     html += "<div class=\"stats\">";
@@ -196,10 +210,10 @@ static std::string build_home(QueryEngine& qe) {
     html += "</div>";
 
     // Help
-    html += "<div style=\"margin-top:24px\"><h3>ℹ️ 使用说明</h3><div class=\"result-item\">"
+    html += "<section class=\"help-section\"><h3>使用说明</h3><div class=\"result-item\">"
             "<p>输入 URL 地址或域名查看历史网页。例如：<code>sina.com.cn</code> 或 <code>http://www.pku.edu.cn</code></p>"
-            "<p style=\"margin-top:8px;color:#6b7280\">支持按域名浏览、URL 前缀搜索、以及查看同一URL的多个历史版本。</p>"
-            "</div></div>";
+            "<p class=\"meta\">支持按域名浏览、URL 前缀搜索、以及查看同一URL的多个历史版本。</p>"
+            "</div></section>";
 
     html += PAGE_FOOTER;
     return html;
@@ -214,10 +228,10 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
     snprintf(hdr, sizeof(hdr), PAGE_HEADER, "搜索结果");
     html = hdr;
 
-    html += "<div class=\"nav-links\"><a href=\"/\">← 返回</a></div>";
-    html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\" style=\"display:flex;gap:8px;width:100%%\">"
+    html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
+    html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
             "<input type=\"text\" name=\"q\" value=\"" + html_escape(query) + "\">"
-            "<button>🔍</button></form></div>";
+            "<button>搜索</button></form></div>";
 
     // Check if it's a specific URL
     if (query.find("http://") == 0 || query.find("https://") == 0) {
@@ -270,11 +284,11 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
         char hdr[6000];
         snprintf(hdr, sizeof(hdr), PAGE_HEADER, "未找到");
         std::string html = hdr;
-        html += "<div class=\"nav-links\"><a href=\"/\">← 返回</a></div>";
-        html += "<div class=\"notice\">⚠️ 未找到 URL: <strong>" + html_escape(url) + "</strong> 的存档。</div>";
-        html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\" style=\"display:flex;gap:8px;width:100%%\">"
+        html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
+        html += "<div class=\"notice\">未找到 URL: <strong>" + html_escape(url) + "</strong> 的存档。</div>";
+        html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
                 "<input type=\"text\" name=\"q\" value=\"" + html_escape(url) + "\">"
-                "<button>🔍</button></form></div>";
+                "<button>搜索</button></form></div>";
         html += PAGE_FOOTER;
         return html;
     }
@@ -283,14 +297,14 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
     snprintf(buf, sizeof(buf), PAGE_HEADER, html_escape(art.title).c_str());
     std::string html(buf);
 
-    html += "<div class=\"nav-links\"><a href=\"/\">← 返回</a> | "
-            "<a href=\"/calendar?url=" + url_encode(url) + "\">📅 查看所有版本</a></div>";
+    html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
+            "<a href=\"/calendar?url=" + url_encode(url) + "\">查看所有版本</a></div>";
 
     html += "<div class=\"page-view\"><h2>" + html_escape(art.title.empty() ? "(无标题)" : art.title) + "</h2>";
     html += "<div class=\"page-meta\">"
-            "<div>📍 <strong>URL:</strong> " + html_escape(url) + "</div>"
-            "<div>🕐 <strong>时间:</strong> " + fmt_date(art.date) + "</div>"
-            "<div>🏠 <strong>站点:</strong> " + html_escape(extract_host(url)) + "</div>"
+            "<div><strong>URL:</strong> " + html_escape(url) + "</div>"
+            "<div><strong>时间:</strong> " + fmt_date(art.date) + "</div>"
+            "<div><strong>站点:</strong> " + html_escape(extract_host(url)) + "</div>"
             "</div>";
 
     // Version count
@@ -315,16 +329,16 @@ static std::string build_calendar(QueryEngine& qe, const std::string& url) {
     snprintf(buf, sizeof(buf), PAGE_HEADER, "版本历史");
     std::string html(buf);
 
-    html += "<div class=\"nav-links\"><a href=\"/\">← 返回</a> | "
-            "<a href=\"/replay?url=" + url_encode(url) + "\">📄 查看最新</a></div>";
+    html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
+            "<a href=\"/replay?url=" + url_encode(url) + "\">查看最新版本</a></div>";
 
-    html += "<h2 style=\"margin:16px 0\">📅 版本历史</h2>";
+    html += "<h2>版本历史</h2>";
     html += "<div class=\"result-item\"><strong>URL:</strong> " + html_escape(url) + "<br>"
             "<strong>站点:</strong> " + html_escape(extract_host(url)) + "<br>"
             "<strong>版本数:</strong> " + std::to_string(vers.size()) + "</div>";
 
     if (!vers.empty()) {
-        html += "<h3 style=\"margin-top:20px\">所有版本</h3>";
+        html += "<h3>所有版本</h3>";
         for (auto& v : vers) {
             html += "<div class=\"result-item\">"
                     "<a href=\"/replay?url=" + url_encode(url) + "&date=" + std::to_string(v.date) + "\">"
