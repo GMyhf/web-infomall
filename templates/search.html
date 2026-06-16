@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}搜索结果: {{ query }}{% endblock %}
+{% block content %}
+<div class="nav-links"><a href="/">← 返回首页</a></div>
+
+<div class="search-bar">
+  <form action="/search" method="get" style="display:flex;gap:8px;width:100%;">
+    <input type="text" name="q" value="{{ query }}" placeholder="输入 URL 搜索...">
+    <input type="date" name="date" value="{{ date_filter or '' }}">
+    <button type="submit">🔍 搜索</button>
+  </form>
+</div>
+
+{% if query %}
+  {% if results %}
+  <h3 style="margin-top:16px;">找到 {{ results|length }} 个匹配的 URL</h3>
+  {% for r in results %}
+  <div class="result-item">
+    <a href="/replay?url={{ r.url|urlencode }}">{{ r.url }}</a>
+    <div class="meta">
+      {{ r.version_count }} 个版本 · 首次: {{ r.first_seen }} · 最后: {{ r.last_seen }}
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="notice">未找到匹配 <strong>{{ query }}</strong> 的 URL。请尝试更短的URL前缀或不同的搜索词。</div>
+  {% endif %}
+{% endif %}
+{% endblock %}

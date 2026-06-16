@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}未找到: {{ url }}{% endblock %}
+{% block content %}
+<div class="nav-links"><a href="/">← 返回首页</a></div>
+<div class="notice">⚠️ 未找到 URL: <strong>{{ url }}</strong> 的存档。</div>
+<div class="search-bar">
+  <form action="/search" method="get" style="display:flex;gap:8px;width:100%;">
+    <input type="text" name="q" value="{{ url }}" placeholder="输入 URL 搜索...">
+    <button type="submit">🔍 搜索</button>
+  </form>
+</div>
+{% endblock %}

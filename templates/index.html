@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Web InfoMall — 首页{% endblock %}
+{% block content %}
+<div class="search-bar">
+  <form action="/search" method="get" style="display:flex;gap:8px;width:100%;">
+    <input type="text" name="q" placeholder="输入 URL 搜索历史网页..." autofocus>
+    <input type="date" name="date" title="限定日期 (可选)">
+    <button type="submit">🔍 搜索</button>
+  </form>
+</div>
+
+{% if stats %}
+<div class="stats">
+  <div class="stat-card"><div class="number">{{ "{:,}".format(stats.total_pages) }}</div><div class="label">已存档网页</div></div>
+  <div class="stat-card"><div class="number">{{ "{:,}".format(stats.total_unique_urls) }}</div><div class="label">不重复URL</div></div>
+  <div class="stat-card"><div class="number">{{ "{:,}".format(stats.total_hosts) }}</div><div class="label">网站域名</div></div>
+  <div class="stat-card"><div class="number">{{ stats.first_date }} — {{ stats.last_date }}</div><div class="label">时间范围</div></div>
+</div>
+{% endif %}
+
+{% if random_urls %}
+<div style="margin-top:24px;">
+  <h3>📌 随机页面</h3>
+  {% for url in random_urls %}
+  <div class="result-item">
+    <a href="/replay?url={{ url|urlencode }}">{{ url }}</a>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div style="margin-top:24px;">
+  <h3>ℹ️ 使用说明</h3>
+  <div class="result-item">
+    <p>输入一个历史网页的 URL 地址，查看其在不同时间点的存档版本。</p>
+    <p style="margin-top:8px;color:#6b7280;">支持按日期筛选：在日期框中指定日期后，将显示最接近该日期的网页版本。</p>
+  </div>
+</div>
+{% endblock %}

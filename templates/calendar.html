@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}版本历史: {{ url }}{% endblock %}
+{% block content %}
+<div class="nav-links">
+  <a href="/">← 返回首页</a> |
+  <a href="/replay?url={{ url|urlencode }}">📄 查看最新版本</a>
+</div>
+
+<h2 style="margin:16px 0;">📅 URL 存档版本历史</h2>
+<div class="result-item" style="margin-bottom:20px;">
+  <strong>URL:</strong> <a href="{{ url }}">{{ url }}</a><br>
+  <strong>站点:</strong> {{ host }}<br>
+  <strong>版本数:</strong> {{ versions|length if versions else 0 }}
+</div>
+
+{% if calendar %}
+<h3>按年份浏览</h3>
+<div class="calendar">
+  {% for year in calendar.keys()|sort(reverse=True) %}
+  <div class="calendar-year">
+    <h3>{{ year }} 年</h3>
+    <div class="months">
+      {% for month in calendar[year].keys()|sort %}
+      <a class="month-link" href="/replay?url={{ url|urlencode }}&date={{ year }}{{ '%02d' % (month|int) }}01">
+        {{ month }}月 ({{ calendar[year][month]|length }})
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if versions %}
+<h3 style="margin-top:20px;">所有版本 ({{ versions|length }})</h3>
+<div class="version-list">
+  {% for v in versions %}
+  <div class="version-row">
+    <a href="/replay?url={{ url|urlencode }}&date={{ v.crawl_date }}">
+      {{ v.crawl_date[:4] }}-{{ v.crawl_date[4:6] }}-{{ v.crawl_date[6:8] }}
+    </a>
+    <span class="meta">({{ v.page_count }} 条记录)</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

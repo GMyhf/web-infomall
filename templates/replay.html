@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title or page.url }}{% endblock %}
+{% block content %}
+<div class="nav-links">
+  <a href="/">← 返回首页</a> |
+  <a href="/calendar?url={{ page.url|urlencode }}">📅 查看所有版本</a>
+</div>
+
+<div class="page-view">
+  <h2>{{ page.title or '(无标题)' }}</h2>
+  <div class="page-meta">
+    <div>📍 <strong>URL:</strong> <a href="{{ page.url }}">{{ page.url }}</a></div>
+    <div>🕐 <strong>存档时间:</strong> {% if page.crawl_time|length >= 8 %}
+      {{ page.crawl_time[:4] }}-{{ page.crawl_time[4:6] }}-{{ page.crawl_time[6:8] }}
+    {% else %}
+      {{ page.crawl_time }}
+    {% endif %}</div>
+    <div>🏠 <strong>站点:</strong> {{ page.host }}</div>
+    {% if page.content_type %}
+    <div>📄 <strong>类型:</strong> {{ page.content_type }}</div>
+    {% endif %}
+  </div>
+
+  {% if version_count and version_count > 1 %}
+  <div class="notice">
+    此 URL 共有 <strong>{{ version_count }}</strong> 个历史版本。
+    <a href="/calendar?url={{ page.url|urlencode }}">查看所有版本 →</a>
+  </div>
+  {% endif %}
+
+  <div class="page-body">{{ page.body or '(无正文内容)' }}</div>
+</div>
+{% endblock %}
