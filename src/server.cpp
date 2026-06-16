@@ -75,21 +75,27 @@ static const char* PAGE_HEADER =
     "h2{font-size:1.45rem;line-height:1.25}h3{font-size:1rem;color:#344054;margin:18px 0 10px}"
     "a{color:var(--brand);text-decoration:none}a:hover{text-decoration:underline}"
     "code{background:var(--surface-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#5c3f20}"
-    ".search-bar{background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:14px;margin:22px 0}"
+    ".search-panel{margin:22px 0}"
+    ".search-panel .hint{color:var(--muted);font-size:.9rem;margin-top:-10px;margin-bottom:12px}"
+    ".search-bar{background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:14px;margin:22px 0 12px}"
     ".search-bar form{display:flex;gap:10px;width:100%%;align-items:stretch}"
-    ".search-bar input[type=text]{flex:1;min-width:0;padding:12px 14px;font-size:1rem;border:1px solid #cfc5b7;border-radius:6px;background:#fff;color:var(--ink);outline:none}"
-    ".search-bar input[type=text]:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(47,93,98,.16)}"
+    ".search-bar input[type=text]{flex:1;min-width:0;padding:12px 14px;font-size:1rem;border:1px solid #cfc5b7;border-radius:6px;background:#fff;color:var(--ink);outline:none;transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}"
+    ".search-bar input[type=text]:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(47,93,98,.18);background:#fffefb}"
     ".search-bar button{padding:0 20px;min-height:46px;background:var(--brand);color:#fff;border:none;border-radius:6px;font-size:.96rem;font-weight:650;cursor:pointer;white-space:nowrap}"
     ".search-bar button:hover{background:var(--brand-2)}"
+    ".quick-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}"
+    ".quick-links a{display:inline-flex;align-items:center;border:1px solid var(--line);background:var(--surface-2);border-radius:999px;padding:5px 10px;font-size:.84rem;color:#4e5c60}"
+    ".quick-links a:hover{background:var(--info-soft);text-decoration:none;color:var(--brand-2)}"
+    ".result-summary{color:#344054;font-size:1rem;margin:18px 0 10px}"
     ".result-item{background:var(--surface);padding:15px 18px;margin:10px 0;border-radius:8px;border:1px solid var(--line);box-shadow:0 1px 0 rgba(58,48,35,.04)}"
     ".result-item:hover{border-color:#c8b9a8;background:#fff}"
     ".result-item a{font-size:1rem;font-weight:620;overflow-wrap:anywhere}"
     ".result-item .meta,.meta{color:var(--muted);font-size:.86rem;margin-top:6px}"
-    ".page-view{background:var(--surface);padding:26px;border-radius:8px;border:1px solid var(--line);box-shadow:var(--shadow);margin:18px 0}"
-    ".page-view h2{margin-bottom:14px;overflow-wrap:anywhere}"
-    ".page-meta{display:grid;gap:8px;color:var(--muted);font-size:.9rem;margin-bottom:18px;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}"
-    ".page-meta div{overflow-wrap:anywhere}"
-    ".page-body{line-height:1.85;white-space:pre-wrap;word-break:break-word;font-size:1rem;color:#2b3036;padding-top:4px}"
+    ".page-view{background:var(--surface);padding:30px;border-radius:8px;border:1px solid var(--line);box-shadow:var(--shadow);margin:18px auto;max-width:900px}"
+    ".page-view h2{margin-bottom:16px;overflow-wrap:anywhere;font-size:1.55rem;line-height:1.35}"
+    ".page-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;color:var(--muted);font-size:.9rem;margin-bottom:24px;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}"
+    ".meta-item{min-width:0}.meta-label{display:block;color:#7b7166;font-size:.76rem;font-weight:700;margin-bottom:3px}.meta-value{display:block;color:#344054;overflow-wrap:anywhere}"
+    ".page-body{max-width:760px;margin:0 auto;line-height:1.95;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:1.05rem;color:#2b3036;letter-spacing:0;text-align:left}"
     ".notice{background:#fff7e8;border:1px solid #e7be82;padding:13px 15px;border-radius:8px;margin:14px 0;color:#7a4316;font-size:.92rem}"
     ".notice a{color:#7a4316;font-weight:650}"
     ".stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:16px 0 22px}"
@@ -101,8 +107,8 @@ static const char* PAGE_HEADER =
     ".nav-links a:hover{background:var(--info-soft);text-decoration:none}"
     "footer{text-align:center;padding:32px;color:#8b8175;font-size:.82rem}"
     ".badge{display:inline-flex;align-items:center;padding:3px 8px;background:var(--info-soft);color:var(--brand-2);border:1px solid #c9dcd8;border-radius:999px;font-size:.78rem;font-weight:650;margin-left:6px;vertical-align:middle}"
-    "@media(max-width:720px){header{padding:16px}.header-inner{display:block}.system-badge{margin-top:10px}.container{padding:20px 14px 32px}.search-bar{padding:12px}.search-bar form{flex-direction:column}.search-bar button{width:100%%}.page-view{padding:18px}.stats{grid-template-columns:1fr 1fr}}"
-    "@media(max-width:420px){.stats{grid-template-columns:1fr}header h1{font-size:1.08rem}}"
+    "@media(max-width:720px){header{padding:16px}.header-inner{display:block}.system-badge{margin-top:10px;white-space:normal}.container{padding:20px 14px 32px}.search-bar{padding:12px}.search-bar form{flex-direction:column}.search-bar button{width:100%%}.page-view{padding:20px;margin:14px 0}.page-view h2{font-size:1.32rem}.page-meta{grid-template-columns:1fr}.page-body{font-size:1rem;line-height:1.88}.stats{grid-template-columns:1fr 1fr}}"
+    "@media(max-width:420px){.stats{grid-template-columns:1fr}header h1{font-size:1.08rem}.container{padding-left:12px;padding-right:12px}.result-item{padding:13px 14px}.quick-links a{max-width:100%%;overflow-wrap:anywhere}.page-view{padding:16px}.page-body{font-size:.98rem;line-height:1.82}}"
     "</style></head><body>"
     "<header><div class=\"header-inner\"><div><h1><a href=\"/\">Web InfoMall — 历史网页回放</a></h1>"
     "<p>中国网页信息博物馆 · Archive Replay</p></div><span class=\"system-badge\">C++ Replay System · Phase 2</span></div></header><div class=\"container\">";
@@ -195,9 +201,15 @@ static std::string build_home(QueryEngine& qe) {
     std::string html(buf);
 
     // Search bar
-    html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
+    html += "<section class=\"search-panel\"><div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
             "<input type=\"text\" name=\"q\" placeholder=\"输入 URL 或域名搜索...\" autofocus>"
-            "<button type=\"submit\">搜索</button></form></div>";
+            "<button type=\"submit\">搜索</button></form></div>"
+            "<p class=\"hint\">可输入完整 URL、域名，或域名片段。</p>"
+            "<div class=\"quick-links\">"
+            "<a href=\"/search?q=sina\">sina</a>"
+            "<a href=\"/search?q=dailynews.sina.com.cn\">dailynews.sina.com.cn</a>"
+            "<a href=\"/search?q=news.sina.com.cn\">news.sina.com.cn</a>"
+            "</div></section>";
 
     // Stats
     html += "<div class=\"stats\">";
@@ -212,7 +224,7 @@ static std::string build_home(QueryEngine& qe) {
     // Help
     html += "<section class=\"help-section\"><h3>使用说明</h3><div class=\"result-item\">"
             "<p>输入 URL 地址或域名查看历史网页。例如：<code>sina.com.cn</code> 或 <code>http://www.pku.edu.cn</code></p>"
-            "<p class=\"meta\">支持按域名浏览、URL 前缀搜索、以及查看同一URL的多个历史版本。</p>"
+            "<p class=\"meta\">支持按域名浏览、URL 前缀搜索，以及查看同一 URL 的多个历史版本。</p>"
             "</div></section>";
 
     html += PAGE_FOOTER;
@@ -224,14 +236,15 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
     snprintf((char*)alloca(1000), sizeof(PAGE_HEADER),
         "搜索: %s", html_escape(query).c_str());
     // Use simple string concat
-    char hdr[6000];
+    char hdr[32768];
     snprintf(hdr, sizeof(hdr), PAGE_HEADER, "搜索结果");
     html = hdr;
 
     html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
-    html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
+    html += "<section class=\"search-panel\"><div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
             "<input type=\"text\" name=\"q\" value=\"" + html_escape(query) + "\">"
-            "<button>搜索</button></form></div>";
+            "<button>搜索</button></form></div>"
+            "<p class=\"hint\">缩短关键词可以扩大匹配范围；输入完整 URL 会直接进入回放。</p></section>";
 
     // Check if it's a specific URL
     if (query.find("http://") == 0 || query.find("https://") == 0) {
@@ -244,7 +257,7 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
     auto urls = qe.get_host_urls(query, 100);
     if (!urls.empty()) {
         char buf[256];
-        snprintf(buf, sizeof(buf), "<h3>域名 <strong>%s</strong> 下有 %zu 个页面</h3>",
+        snprintf(buf, sizeof(buf), "<h3 class=\"result-summary\">域名 <strong>%s</strong> 下有 %zu 个页面</h3>",
                  html_escape(query).c_str(), urls.size());
         html += buf;
         for (auto& u : urls) {
@@ -258,7 +271,7 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
         auto hosts = qe.search_host_substring(query, 100);
         if (!hosts.empty()) {
             char buf[256];
-            snprintf(buf, sizeof(buf), "<h3>找到 %zu 个匹配 \"%s\" 的域名</h3>",
+            snprintf(buf, sizeof(buf), "<h3 class=\"result-summary\">找到 %zu 个匹配 \"%s\" 的域名</h3>",
                      hosts.size(), html_escape(query).c_str());
             html += buf;
             for (auto& h : hosts) {
@@ -269,7 +282,7 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
                         "</div>";
             }
         } else {
-            html += "<div class=\"notice\">未找到匹配 <strong>" + html_escape(query) + "</strong> 的结果。</div>";
+            html += "<div class=\"notice\"><strong>未找到匹配结果。</strong><br>请尝试更短的域名片段，或输入完整 URL 后直接回放。</div>";
         }
     }
 
@@ -281,14 +294,15 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
     auto art = qe.get_page(url);
     if (art.url.empty()) {
         // Build a proper "not found" page instead of empty redirect
-        char hdr[6000];
+        char hdr[32768];
         snprintf(hdr, sizeof(hdr), PAGE_HEADER, "未找到");
         std::string html = hdr;
         html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
-        html += "<div class=\"notice\">未找到 URL: <strong>" + html_escape(url) + "</strong> 的存档。</div>";
-        html += "<div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
+        html += "<div class=\"notice\"><strong>未找到存档。</strong><br>URL: " + html_escape(url) + "</div>";
+        html += "<section class=\"search-panel\"><div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
                 "<input type=\"text\" name=\"q\" value=\"" + html_escape(url) + "\">"
-                "<button>搜索</button></form></div>";
+                "<button>搜索</button></form></div>"
+                "<p class=\"hint\">可以删除路径末尾部分，只保留域名或较短 URL 前缀再试。</p></section>";
         html += PAGE_FOOTER;
         return html;
     }
@@ -302,9 +316,9 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
 
     html += "<div class=\"page-view\"><h2>" + html_escape(art.title.empty() ? "(无标题)" : art.title) + "</h2>";
     html += "<div class=\"page-meta\">"
-            "<div><strong>URL:</strong> " + html_escape(url) + "</div>"
-            "<div><strong>时间:</strong> " + fmt_date(art.date) + "</div>"
-            "<div><strong>站点:</strong> " + html_escape(extract_host(url)) + "</div>"
+            "<div class=\"meta-item\"><span class=\"meta-label\">URL</span><span class=\"meta-value\">" + html_escape(url) + "</span></div>"
+            "<div class=\"meta-item\"><span class=\"meta-label\">存档时间</span><span class=\"meta-value\">" + fmt_date(art.date) + "</span></div>"
+            "<div class=\"meta-item\"><span class=\"meta-label\">站点</span><span class=\"meta-value\">" + html_escape(extract_host(url)) + "</span></div>"
             "</div>";
 
     // Version count
@@ -325,7 +339,7 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
 static std::string build_calendar(QueryEngine& qe, const std::string& url) {
     auto vers = qe.get_versions(url);
 
-    char buf[6000];
+    char buf[32768];
     snprintf(buf, sizeof(buf), PAGE_HEADER, "版本历史");
     std::string html(buf);
 
