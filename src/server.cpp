@@ -452,7 +452,7 @@ static std::string build_home(QueryEngine& qe) {
         }
         html += "</div>";
         html += "<div style=\"margin-top:6px;font-size:.82rem;color:var(--muted)\">"
-                "<a href=\"/stats\">查看完整统计 →</a></div>";
+                "<a href=\"/stats-page\">查看完整统计 →</a></div>";
     }
 
     // Today in history
@@ -1156,6 +1156,95 @@ static std::string build_diff(QueryEngine& qe, const std::string& url,
     return html;
 }
 
+// ── Stats Page (HTML) ───────────────────────────────────────
+
+static std::string build_stats_page(QueryEngine& qe) {
+    uint32_t total, urls, dmin, dmax;
+    qe.get_stats(total, urls, dmin, dmax);
+
+    char buf[32768];
+    snprintf(buf, sizeof(buf), PAGE_HEADER, "统计信息");
+    std::string html(buf);
+
+    html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
+    html += "<h2>📊 归档统计</h2>";
+
+    html += "<div class=\"stats\">";
+    snprintf(buf, sizeof(buf),
+        "<div class=\"stat-card\"><div class=\"number\">%u</div><div class=\"label\">总存档数</div></div>"
+        "<div class=\"stat-card\"><div class=\"number\">%u</div><div class=\"label\">域名数</div></div>"
+        "<div class=\"stat-card\"><div class=\"number\">%s</div><div class=\"label\">最早存档</div></div>"
+        "<div class=\"stat-card\"><div class=\"number\">%s</div><div class=\"label\">最新存档</div></div>",
+        total, urls, fmt_date(dmin).c_str(), fmt_date(dmax).c_str());
+    html += buf;
+    html += "</div>";
+
+    // Year distribution
+    auto yd = qe.get_year_distribution();
+    if (!yd.empty()) {
+        html += "<h3>按年份存档量</h3>";
+        html += "<table style=\"width:100%;border-collapse:collapse;margin:12px 0\">";
+        html += "<tr style=\"border-bottom:2px solid var(--line);color:var(--muted)\">"
+                "<th style=\"text-align:left;padding:8px\">年份</th>"
+                "<th style=\"text-align:right;padding:8px\">存档数</th>"
+                "<th style=\"text-align:right;padding:8px\">占比</th>"
+                "<th style=\"text-align:left;padding:8px\"></th></tr>";
+        for (auto& y : yd) {
+            float pct = total > 0 ? y.count * 100.0f / total : 0;
+            int bar_w = static_cast<int>(pct * 3); // 0-300px max
+            snprintf(buf, sizeof(buf),
+                "<tr style=\"border-bottom:1px solid var(--line)\">"
+                "<td style=\"padding:6px 8px;font-weight:650\">%u</td>"
+                "<td style=\"padding:6px 8px;text-align:right\">%u</td>"
+                "<td style=\"padding:6px 8px;text-align:right\">%.1f%%</td>"
+                "<td style=\"padding:6px 8px\"><div style=\"background:var(--brand);height:14px;width:%dpx;border-radius:3px;opacity:.6\"></div></td>"
+                "</tr>",
+                y.year, y.count, pct, bar_w > 0 ? bar_w : 2);
+            html += buf;
+        }
+        html += "</table>";
+    }
+
+    // All hosts listing
+    auto hosts = qe.get_top_hosts(1000);
+    if (!hosts.empty()) {
+        html += "<h3 style=\"margin-top:24px\">全部域名 (" + std::to_string(hosts.size()) + ")</h3>";
+        html += "<div class=\"top-domains\">";
+        int rank = 0;
+        for (auto& h : hosts) {
+            rank++;
+            if (rank > 50) {
+                html += "<div style=\"padding:8px;color:var(--muted)\">... 还有 "
+                        + std::to_string(hosts.size() - 50) + " 个域名</div>";
+                break;
+            }
+            html += "<div class=\"td-row\"><a href=\"/host?h=" + url_encode(h.first) + "\">"
+                    + html_escape(h.first) + "</a>"
+                    "<span class=\"td-count\">" + std::to_string(h.second) + " 页</span></div>";
+        }
+        html += "</div>";
+    }
+
+    // Server info
+    html += "<h3 style=\"margin-top:24px\">服务器信息</h3>";
+    html += "<div class=\"result-item\">";
+    snprintf(buf, sizeof(buf),
+        "<div class=\"meta-grid\" style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px\">"
+        "<div><strong>软件版本</strong><br>WebInfoMall 2.0</div>"
+        "<div><strong>工作线程</strong><br>%d</div>"
+        "<div><strong>索引格式</strong><br>v2 (URL池)</div>"
+        "<div><strong>分片数</strong><br>%d</div>"
+        "<div><strong>压缩</strong><br>gzip / zlib</div>"
+        "<div><strong>缓存</strong><br>ETag + 304</div>"
+        "</div>",
+        THREAD_POOL_SIZE, NUM_SHARDS);
+    html += buf;
+    html += "</div>";
+
+    html += PAGE_FOOTER;
+    return html;
+}
+
 // ── HTTP Response ─────────────────────────────────────────────
 
 static void send_response(int fd, int code, const std::string& content_type,
@@ -1367,6 +1456,10 @@ static void handle_request(QueryEngine& qe, int csock) {
     }
     else if (req.path == "/ping") {
         send_response(csock, 200, "text/plain", "pong");
+    }
+    else if (req.path == "/stats-page") {
+        response = build_stats_page(qe);
+        send_response(csock, code, content_type, response, req.accepts_gzip);
     }
     else if (req.path == "/stats") {
         uint32_t total, urls, dmin, dmax;
