@@ -26,6 +26,7 @@
 #include <sstream>
 #include <ctime>
 #include <map>
+#include <set>
 #include <sys/time.h>
 #include <zlib.h>
 
@@ -160,7 +161,64 @@ static const char* PAGE_HEADER =
     ".rec-card:hover{border-color:var(--brand);background:#fff}"
     ".rec-card a{font-size:.88rem;font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
     ".rec-card .rec-date{font-size:.78rem;color:var(--muted);margin-top:3px}"
-    /* Host overview page */
+    /* Top domains leaderboard */
+    ".top-domains{display:grid;grid-template-columns:1fr;gap:4px;counter-reset:rank}"
+    ".td-row{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;font-size:.9rem;transition:background .12s;counter-increment:rank}"
+    ".td-row:hover{background:var(--surface-2)}"
+    ".td-row::before{content:counter(rank);display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%%;background:var(--brand);color:#fff;font-size:.72rem;font-weight:750;flex-shrink:0}"
+    ".td-row:nth-child(1)::before{background:var(--accent)}"
+    ".td-row:nth-child(2)::before{background:#c0852c}"
+    ".td-row:nth-child(3)::before{background:#6b8e6b}"
+    ".td-row a{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}"
+    ".td-row .td-count{color:var(--muted);font-size:.78rem;white-space:nowrap}"
+    /* Year chart on home */
+    ".home-year-chart{display:flex;gap:3px;align-items:flex-end;height:60px;margin-top:8px;padding:0 2px}"
+    ".home-year-chart .hy-bar{flex:1;min-width:3px;background:var(--brand);border-radius:2px 2px 0 0;opacity:.5;transition:opacity .15s;position:relative}"
+    ".home-year-chart .hy-bar:hover{opacity:1}"
+    ".home-year-chart .hy-bar .hy-tip{display:none;position:absolute;bottom:calc(100%%+6px);left:50%%;transform:translateX(-50%%);background:#333;color:#fff;padding:2px 6px;border-radius:3px;font-size:.68rem;white-space:nowrap;z-index:1}"
+    ".home-year-chart .hy-bar:hover .hy-tip{display:block}"
+    ".hy-labels{display:flex;gap:3px;padding:2px 2px 0;font-size:.62rem;color:var(--muted)}"
+    ".hy-labels span{flex:1;min-width:3px;text-align:center;overflow:hidden}"
+    /* Today in history */
+    ".today-section{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}"
+    ".today-section h3{font-size:.95rem;color:#344054;margin-bottom:8px}"
+    ".today-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px}"
+    ".today-card{background:var(--surface);padding:10px 13px;border-radius:6px;border:1px solid var(--line);font-size:.85rem;transition:border-color .12s,background .12s}"
+    ".today-card:hover{border-color:var(--brand);background:#fff}"
+    ".today-card a{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+    ".today-card .today-date{font-size:.74rem;color:var(--muted);margin-top:2px}"
+    /* Date browse page */
+    ".date-browse-bar{background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:18px;margin:16px 0}"
+    ".date-browse-bar form{display:flex;gap:10px;align-items:center;flex-wrap:wrap}"
+    ".date-browse-bar label{font-weight:650;color:#344054;font-size:.92rem}"
+    ".date-browse-bar input[type=date]{padding:10px 12px;font-size:.95rem;border:1px solid #cfc5b7;border-radius:6px}"
+    ".date-btn{padding:8px 6px;background:var(--surface);border:1px solid var(--line);border-radius:6px;color:var(--brand);font-size:.8rem;font-weight:600;cursor:pointer;transition:all .12s}"
+    ".date-btn:hover{background:var(--info-soft);border-color:var(--brand)}"
+    ".date-quick-grid{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}"
+    /* Sitemap tree */
+    ".site-tree{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin:16px 0}"
+    ".site-tree ul{list-style:none;padding:0;margin:0}"
+    ".site-tree li{padding:2px 0;position:relative}"
+    ".site-tree .tree-dir{font-weight:650;color:#344054;font-size:.9rem;margin:6px 0 2px}"
+    ".site-tree .tree-dir::before{content:\"📁 \";margin-right:2px}"
+    ".site-tree .tree-file{margin-left:20px;font-size:.86rem;padding:2px 0}"
+    ".site-tree .tree-file a{color:var(--brand)}"
+    ".site-tree .tree-count{color:var(--muted);font-size:.78rem;margin-left:4px}"
+    /* Diff view */
+    ".diff-section{margin-top:20px;border-top:1px solid var(--line);padding-top:16px}"
+    ".diff-section h3{font-size:.95rem;color:#344054;margin-bottom:10px}"
+    ".diff-bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}"
+    ".diff-bar a{padding:6px 12px;font-size:.84rem;border-radius:6px;text-decoration:none;font-weight:650;transition:all .12s}"
+    ".diff-bar a.diff-prev{border:1px solid var(--line);background:var(--surface-2);color:var(--muted)}"
+    ".diff-bar a.diff-prev:hover{background:var(--info-soft);color:var(--brand)}"
+    ".diff-bar a.diff-next{border:1px solid var(--line);background:var(--surface-2);color:var(--muted)}"
+    ".diff-bar a.diff-next:hover{background:var(--info-soft);color:var(--brand)}"
+    ".diff-added{background:#e6f7e6;border-left:3px solid #4caf50;padding:8px 12px;margin:4px 0;border-radius:0 6px 6px 0}"
+    ".diff-removed{background:#fde8e8;border-left:3px solid #e57373;padding:8px 12px;margin:4px 0;border-radius:0 6px 6px 0;text-decoration:line-through;color:#8b5050}"
+    ".diff-unchanged{padding:8px 12px;margin:4px 0;color:var(--muted);font-size:.9rem}"
+    ".diff-label{display:inline-block;font-size:.72rem;font-weight:750;padding:1px 6px;border-radius:3px;margin-right:6px}"
+    ".diff-added .diff-label{background:#c8e6c9;color:#2e7d32}"
+    ".diff-removed .diff-label{background:#ffcdd2;color:#c62828}"
     ".host-hero{background:var(--surface);padding:24px 28px;border-radius:10px;border:1px solid var(--line);box-shadow:var(--shadow);margin:16px 0}"
     ".host-hero h2{font-size:1.6rem;margin-bottom:4px;color:var(--brand);overflow-wrap:anywhere}"
     ".host-hero .host-url-count{color:var(--muted);font-size:.9rem;margin-top:6px}"
@@ -332,28 +390,97 @@ static std::string build_home(QueryEngine& qe) {
     snprintf(buf, sizeof(buf), PAGE_HEADER, "Web InfoMall — 首页");
     std::string html(buf);
 
+    // Search bar with date browse quick-link
     html += "<section class=\"search-panel\"><div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
             "<input type=\"text\" name=\"q\" placeholder=\"输入 URL 或域名搜索...\" autofocus>"
             "<button type=\"submit\">搜索</button></form></div>"
-            "<p class=\"hint\">可输入完整 URL、域名，或域名片段。</p>"
+            "<p class=\"hint\">可输入完整 URL、域名，或域名片段。| "
+            "<a href=\"/random\">🎲 手气不错</a> | "
+            "<a href=\"/browse\">📅 按日期浏览</a></p>"
             "<div class=\"quick-links\">"
             "<a href=\"/search?q=sina\">sina</a>"
             "<a href=\"/search?q=dailynews.sina.com.cn\">dailynews.sina.com.cn</a>"
             "<a href=\"/search?q=news.sina.com.cn\">news.sina.com.cn</a>"
             "</div></section>";
 
+    // Stats row + year chart
     html += "<div class=\"stats\">";
     snprintf(buf, sizeof(buf),
         "<div class=\"stat-card\"><div class=\"number\">%u</div><div class=\"label\">已存档</div></div>"
         "<div class=\"stat-card\"><div class=\"number\">%u</div><div class=\"label\">域名</div></div>"
-        "<div class=\"stat-card\"><div class=\"number\">%s — %s</div><div class=\"label\">时间范围</div></div>",
+        "<div class=\"stat-card\"><div class=\"number\">%s — %s</div><div class=\"label\">时间范围</div></div>"
+        "<div class=\"stat-card\"><a href=\"/random\" style=\"font-size:1.5rem;text-decoration:none\">🎲</a><div class=\"label\">随机浏览</div></div>",
         total, urls, fmt_date(dmin).c_str(), fmt_date(dmax).c_str());
     html += buf;
     html += "</div>";
 
-    html += "<section class=\"help-section\"><h3>使用说明</h3><div class=\"result-item\">"
+    // Year distribution chart
+    auto year_dist = qe.get_year_distribution();
+    if (year_dist.size() >= 2) {
+        uint32_t max_count = 0;
+        for (auto& y : year_dist) if (y.count > max_count) max_count = y.count;
+        html += "<h3 style=\"font-size:.9rem;color:#7b7166;margin:12px 0 4px\">📊 按年份存档量</h3>";
+        html += "<div class=\"home-year-chart\">";
+        for (auto& y : year_dist) {
+            int pct = max_count > 0 ? (y.count * 100 / max_count) : 0;
+            if (pct < 4) pct = 4;
+            snprintf(buf, sizeof(buf),
+                "<div class=\"hy-bar\" style=\"height:%d%%\">"
+                "<span class=\"hy-tip\">%u: %u 篇</span></div>", pct, y.year, y.count);
+            html += buf;
+        }
+        html += "</div><div class=\"hy-labels\">";
+        uint32_t step = year_dist.size() > 20 ? year_dist.size() / 20 : 1;
+        for (size_t i = 0; i < year_dist.size(); i++) {
+            if (i % step == 0 || i == year_dist.size() - 1)
+                html += "<span>" + std::to_string(year_dist[i].year) + "</span>";
+            else
+                html += "<span></span>";
+        }
+        html += "</div>";
+    }
+
+    // Top domains leaderboard
+    auto top_hosts = qe.get_top_hosts(12);
+    if (!top_hosts.empty()) {
+        html += "<h3 style=\"font-size:.9rem;color:#7b7166;margin:20px 0 6px\">🏆 域名排行榜</h3>";
+        html += "<div class=\"top-domains\">";
+        for (auto& h : top_hosts) {
+            html += "<div class=\"td-row\"><a href=\"/host?h=" + url_encode(h.first) + "\">"
+                    + html_escape(h.first) + "</a>"
+                    "<span class=\"td-count\">" + std::to_string(h.second) + " 页</span></div>";
+        }
+        html += "</div>";
+        html += "<div style=\"margin-top:6px;font-size:.82rem;color:var(--muted)\">"
+                "<a href=\"/stats\">查看完整统计 →</a></div>";
+    }
+
+    // Today in history
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    uint32_t mmdd = (tm_now.tm_mon + 1) * 100 + tm_now.tm_mday;
+
+    auto today_urls = qe.get_today_in_history(mmdd, 8);
+    if (!today_urls.empty()) {
+        html += "<section class=\"today-section\"><h3>📰 历史上的今天 (" +
+                std::to_string(tm_now.tm_mon + 1) + "月" +
+                std::to_string(tm_now.tm_mday) + "日)</h3>";
+        html += "<div class=\"today-grid\">";
+        for (auto& url : today_urls) {
+            std::string host = extract_host(url);
+            html += "<div class=\"today-card\"><a href=\"/replay?url=" + url_encode(url) + "\">"
+                    + html_escape(url) + "</a>"
+                    "<div class=\"today-date\">🏠 " + html_escape(host) + "</div></div>";
+        }
+        html += "</div></section>";
+    }
+
+    // Help
+    html += "<section class=\"help-section\" style=\"margin-top:20px\">"
+            "<h3 style=\"font-size:.9rem;color:#7b7166\">ℹ️ 使用说明</h3><div class=\"result-item\">"
             "<p>输入 URL 地址或域名查看历史网页。例如：<code>sina.com.cn</code> 或 <code>http://www.pku.edu.cn</code></p>"
-            "<p class=\"meta\">支持按域名浏览、URL 前缀搜索，以及查看同一 URL 的多个历史版本。</p>"
+            "<p class=\"meta\">支持按域名浏览、URL 前缀搜索、查看同一 URL 的多个历史版本、版本间差异对比。</p>"
             "</div></section>";
 
     html += PAGE_FOOTER;
@@ -456,6 +583,29 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
             "<a href=\"/calendar?url=%s\">查看所有版本 →</a></div>",
             vers.size(), url_encode(url).c_str());
         html += buf;
+    }
+    // Diff links to adjacent versions
+    if (vers.size() >= 2 && art.date > 0) {
+        uint32_t prev_date = 0, next_date = 0;
+        for (size_t i = 0; i < vers.size(); i++) {
+            if (vers[i].date == art.date) {
+                if (i + 1 < vers.size()) prev_date = vers[i + 1].date;
+                if (i > 0) next_date = vers[i - 1].date;
+                break;
+            }
+        }
+        html += "<div class=\"diff-bar\">";
+        if (prev_date)
+            html += "<a class=\"diff-prev\" href=\"/diff?url=" + url_encode(url) + "&a="
+                    + std::to_string(prev_date) + "&b=" + std::to_string(art.date) + "\">"
+                    "📝 与上一版本 ("
+                    + fmt_date(prev_date) + ") 对比</a>";
+        if (next_date)
+            html += "<a class=\"diff-next\" href=\"/diff?url=" + url_encode(url) + "&a="
+                    + std::to_string(art.date) + "&b=" + std::to_string(next_date) + "\">"
+                    "📝 与下一版本 ("
+                    + fmt_date(next_date) + ") 对比</a>";
+        html += "</div>";
     }
 
     html += "<div class=\"page-body\">"
@@ -588,7 +738,8 @@ static std::string build_host(QueryEngine& qe, const std::string& host) {
     std::string html(buf);
 
     html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
-            "<a href=\"/search?q=" + url_encode(host) + "\">搜索此域名</a></div>";
+            "<a href=\"/search?q=" + url_encode(host) + "\">搜索此域名</a>"
+            "<a href=\"/sitemap?h=" + url_encode(host) + "\">站点地图</a></div>";
 
     if (urls.empty()) {
         html += "<div class=\"notice\"><strong>未找到域名。</strong><br>"
@@ -667,6 +818,338 @@ static std::string build_host(QueryEngine& qe, const std::string& host) {
         html += "<div class=\"result-item\"><a href=\"/replay?url=" + url_encode(u.url) + "\">"
                 + html_escape(u.url) + "</a>";
         html += " <span class=\"meta\">" + fmt_date(u.date) + "</span></div>";
+    }
+
+    html += PAGE_FOOTER;
+    return html;
+}
+
+// ── Sitemap (path tree) ─────────────────────────────────────
+
+static std::string build_sitemap(QueryEngine& qe, const std::string& host) {
+    char buf[32768];
+    std::string title = "站点地图: " + host;
+    snprintf(buf, sizeof(buf), PAGE_HEADER, html_escape(title).c_str());
+    std::string html(buf);
+
+    html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
+            "<a href=\"/host?h=" + url_encode(host) + "\">域名概览</a></div>";
+
+    auto urls = qe.get_host_urls(host, 1000);
+    if (urls.empty()) {
+        html += "<div class=\"notice\">未找到该域名的页面。</div>";
+        html += PAGE_FOOTER;
+        return html;
+    }
+
+    // Build path tree: prefix -> [(full_url, date)]
+    std::map<std::string, std::vector<std::pair<std::string, uint32_t>>> tree;
+    std::string prefix = "http://";
+    if (urls[0].url.find("https://") == 0) prefix = "https://";
+    std::string base = prefix + host;
+
+    for (auto& u : urls) {
+        // Group by path directory
+        std::string path = u.url.substr(base.size());
+        if (path.empty()) path = "/";
+        size_t last_slash = path.rfind('/');
+        std::string dir = base;
+        if (last_slash != std::string::npos && last_slash > 0)
+            dir = base + path.substr(0, last_slash + 1);
+        else if (last_slash == 0)
+            dir = base + "/";
+        tree[dir].push_back({u.url, u.date});
+    }
+
+    snprintf(buf, sizeof(buf),
+        "<h2>🗂️ 站点地图：%s</h2>"
+        "<div class=\"result-item\"><strong>域名:</strong> %s<br>"
+        "<strong>页面数:</strong> %zu<br>"
+        "<strong>目录数:</strong> %zu</div>",
+        html_escape(host).c_str(), html_escape(host).c_str(), urls.size(), tree.size());
+    html += buf;
+
+    // Render tree
+    html += "<div class=\"site-tree\"><ul>";
+    // Root level
+    auto root_it = tree.find(base + "/");
+    if (root_it == tree.end()) root_it = tree.find(base);
+
+    std::set<std::string> shown;
+    // Collect top-level directories
+    std::set<std::string> top_dirs;
+    for (auto& kv : tree) {
+        std::string rel = kv.first.substr(base.size());
+        if (rel.empty() || rel == "/") continue;
+        size_t slash = rel.find('/');
+        if (slash != std::string::npos && slash + 1 < rel.size())
+            top_dirs.insert(base + "/" + rel.substr(0, slash + 1));
+        else if (slash == std::string::npos)
+            top_dirs.insert(base + "/" + rel + "/");
+    }
+
+    // Show root
+    for (auto& kv : tree) {
+        std::string rel = kv.first.substr(base.size());
+        if (rel.empty() || rel == "/" || rel == "") {
+            // Files at root
+            for (auto& u : kv.second) {
+                std::string fn = u.first.substr(base.size());
+                html += "<li class=\"tree-file\"><a href=\"/replay?url=" + url_encode(u.first)
+                        + "\">" + html_escape(fn.empty() ? "/" : fn) + "</a>"
+                        "<span class=\"tree-count\">" + fmt_date(u.second) + "</span></li>";
+            }
+            break;
+        }
+    }
+
+    // Show top-level directories
+    for (auto& td : top_dirs) {
+        std::string dirname = td.substr(base.size());
+        size_t total = 0;
+        for (auto& kv : tree) {
+            if (kv.first.find(td) == 0 || kv.first == td)
+                total += kv.second.size();
+        }
+        html += "<li class=\"tree-dir\">" + html_escape(dirname)
+                + "<span class=\"tree-count\">(" + std::to_string(total) + " 个文件)</span></li>";
+        // Show files in this directory
+        for (auto& kv : tree) {
+            if (kv.first == td || kv.first == td.substr(0, td.size() - 1)) {
+                for (auto& u : kv.second) {
+                    std::string fn = u.first.substr(td.size());
+                    if (fn.find('/') == std::string::npos) {
+                        html += "<li class=\"tree-file\"><a href=\"/replay?url="
+                                + url_encode(u.first) + "\">" + html_escape(fn) + "</a>"
+                                "<span class=\"tree-count\">" + fmt_date(u.second) + "</span></li>";
+                    }
+                }
+            }
+        }
+    }
+
+    html += "</ul></div>";
+    html += PAGE_FOOTER;
+    return html;
+}
+
+// ── Browse by date ──────────────────────────────────────────
+
+static std::string build_browse(QueryEngine& qe, const std::string& date_str) {
+    char buf[32768];
+    snprintf(buf, sizeof(buf), PAGE_HEADER, "按日期浏览");
+    std::string html(buf);
+
+    html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
+
+    // Quick date buttons: compute available years and recent months
+    uint32_t total, urls, dmin, dmax;
+    qe.get_stats(total, urls, dmin, dmax);
+    uint32_t min_year = dmin / 10000, max_year = dmax / 10000;
+
+    html += "<h2>📅 按日期浏览</h2>";
+    html += "<div class=\"date-browse-bar\"><form action=\"/browse\" method=\"get\">"
+            "<label>选择日期：</label>"
+            "<input type=\"date\" name=\"d\" value=\"" + html_escape(date_str) + "\">"
+            "<button>浏览</button></form>";
+    html += "<div class=\"date-quick-grid\"><span style=\"font-size:.82rem;color:var(--muted)\">快速跳转：</span>";
+
+    // Year buttons
+    for (uint32_t y = max_year; y >= min_year && y >= max_year - 12 && y >= min_year; y--) {
+        html += "<a class=\"date-btn\" href=\"/browse?d=" + std::to_string(y) + "0101\">"
+                + std::to_string(y) + "年</a>";
+    }
+    html += "</div></div>";
+
+    if (!date_str.empty() && date_str.size() >= 8) {
+        uint32_t date = static_cast<uint32_t>(atoi(date_str.c_str()));
+        auto results = qe.get_by_date(date, 500);
+
+        if (results.empty()) {
+            html += "<div class=\"notice\">该日期 (" + fmt_date(date)
+                    + ") 没有找到存档页面。请尝试其他日期。</div>";
+        } else {
+            snprintf(buf, sizeof(buf), "<h3 class=\"result-summary\">%s — 共 %zu 个页面</h3>",
+                     fmt_date(date).c_str(), results.size());
+            html += buf;
+
+            // Group by host
+            std::string last_host;
+            for (auto& r : results) {
+                std::string h = extract_host(r.url);
+                if (h != last_host) {
+                    if (last_host.size())
+                        html += "</div>"; // close previous group
+                    html += "<h4 style=\"margin:12px 0 6px;color:#344054\">🏠 "
+                            "<a href=\"/host?h=" + url_encode(h) + "\">"
+                            + html_escape(h) + "</a></h4><div>";
+                    last_host = h;
+                }
+                html += "<div class=\"result-item\"><a href=\"/replay?url="
+                        + url_encode(r.url) + "\">" + html_escape(r.url) + "</a></div>";
+            }
+            if (!last_host.empty()) html += "</div>";
+        }
+    } else {
+        html += "<div class=\"notice\">请选择或输入日期来浏览当天存档的所有页面。</div>";
+    }
+
+    html += PAGE_FOOTER;
+    return html;
+}
+
+// ── Version Diff ────────────────────────────────────────────
+
+// Simple line-level diff: split text by paragraphs, compare
+struct DiffChunk {
+    enum Type { UNCHANGED, ADDED, REMOVED };
+    Type type;
+    std::string text;
+};
+
+static std::vector<DiffChunk> simple_diff(const std::string& old_text,
+                                           const std::string& new_text) {
+    std::vector<DiffChunk> result;
+
+    // Split into paragraphs
+    auto split = [](const std::string& s) -> std::vector<std::string> {
+        std::vector<std::string> lines;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t nl = s.find('\n', pos);
+            if (nl == std::string::npos) nl = s.size();
+            std::string line = s.substr(pos, nl - pos);
+            if (!line.empty())
+                lines.push_back(line);
+            pos = nl + 1;
+        }
+        if (lines.empty() && !s.empty()) lines.push_back(s);
+        return lines;
+    };
+
+    auto old_lines = split(old_text);
+    auto new_lines = split(new_text);
+
+    // Simple LCS-based diff on paragraphs
+    size_t oi = 0, ni = 0;
+    while (oi < old_lines.size() || ni < new_lines.size()) {
+        if (oi < old_lines.size() && ni < new_lines.size() &&
+            old_lines[oi] == new_lines[ni]) {
+            result.push_back({DiffChunk::UNCHANGED, old_lines[oi]});
+            oi++; ni++;
+        } else {
+            // Look ahead for match
+            bool found = false;
+            for (size_t ahead = 1; ahead < 6 && ni + ahead < new_lines.size(); ahead++) {
+                if (oi < old_lines.size() && new_lines[ni + ahead] == old_lines[oi]) {
+                    for (size_t k = 0; k < ahead; k++)
+                        result.push_back({DiffChunk::ADDED, new_lines[ni + k]});
+                    ni += ahead;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                for (size_t ahead = 1; ahead < 6 && oi + ahead < old_lines.size(); ahead++) {
+                    if (ni < new_lines.size() && old_lines[oi + ahead] == new_lines[ni]) {
+                        for (size_t k = 0; k < ahead; k++)
+                            result.push_back({DiffChunk::REMOVED, old_lines[oi + k]});
+                        oi += ahead;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found) {
+                if (oi < old_lines.size())
+                    result.push_back({DiffChunk::REMOVED, old_lines[oi++]});
+                if (ni < new_lines.size())
+                    result.push_back({DiffChunk::ADDED, new_lines[ni++]});
+            }
+        }
+    }
+    return result;
+}
+
+static std::string build_diff(QueryEngine& qe, const std::string& url,
+                               uint32_t date_a, uint32_t date_b) {
+    auto art_a = qe.get_page_by_date(url, date_a);
+    auto art_b = qe.get_page_by_date(url, date_b);
+
+    char buf[32768];
+    snprintf(buf, sizeof(buf), PAGE_HEADER, "版本对比");
+    std::string html(buf);
+
+    html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
+            "<a href=\"/replay?url=" + url_encode(url) + "\">查看最新版本</a>"
+            "<a href=\"/calendar?url=" + url_encode(url) + "\">版本历史</a></div>";
+
+    html += "<h2>版本对比</h2>";
+    html += "<div class=\"result-item\"><strong>URL:</strong> " + html_escape(url) + "<br>";
+
+    if (art_a.url.empty() || art_b.url.empty()) {
+        html += "<div class=\"notice\">无法加载对比所需的两个版本。</div>";
+        html += PAGE_FOOTER;
+        return html;
+    }
+
+    html += "<strong>版本 A:</strong> " + fmt_date(date_a) + " · "
+            "<strong>版本 B:</strong> " + fmt_date(date_b) + "</div>";
+
+    // Version navigation
+    auto vers = qe.get_versions(url);
+    html += "<div class=\"diff-bar\">";
+    // Find previous version before date_a
+    uint32_t prev_date = 0, next_date = 0;
+    for (size_t i = 0; i < vers.size(); i++) {
+        if (vers[i].date == date_a && i + 1 < vers.size()) prev_date = vers[i + 1].date;
+        if (vers[i].date == date_b && i > 0) next_date = vers[i - 1].date;
+    }
+    if (prev_date)
+        html += "<a class=\"diff-prev\" href=\"/diff?url=" + url_encode(url)
+                + "&a=" + std::to_string(prev_date) + "&b=" + std::to_string(date_a) + "\">← 更早版本对比</a>";
+    if (next_date)
+        html += "<a class=\"diff-next\" href=\"/diff?url=" + url_encode(url)
+                + "&a=" + std::to_string(date_b) + "&b=" + std::to_string(next_date) + "\">更新版本对比 →</a>";
+    html += "</div>";
+
+    // Execute diff
+    auto chunks = simple_diff(art_a.body, art_b.body);
+
+    html += "<div class=\"diff-section\"><h3>正文差异</h3>";
+    int total_changes = 0;
+    for (auto& c : chunks) {
+        if (c.type == DiffChunk::ADDED) {
+            html += "<div class=\"diff-added\"><span class=\"diff-label\">+ 新增</span>"
+                    + html_escape(c.text) + "</div>";
+            total_changes++;
+        } else if (c.type == DiffChunk::REMOVED) {
+            html += "<div class=\"diff-removed\"><span class=\"diff-label\">- 删除</span>"
+                    + html_escape(c.text) + "</div>";
+            total_changes++;
+        } else {
+            // Show only some unchanged context
+            static int unchanged_count = 0;
+            unchanged_count++;
+            if (unchanged_count <= 3) {
+                html += "<div class=\"diff-unchanged\">" + html_escape(c.text) + "</div>";
+            } else if (unchanged_count == 4) {
+                html += "<div class=\"diff-unchanged\">... (省略无变化段落) ...</div>";
+            }
+        }
+    }
+    if (total_changes == 0)
+        html += "<div class=\"notice\">两个版本正文内容完全相同。</div>";
+    html += "</div>";
+
+    // Title diff
+    if (art_a.title != art_b.title) {
+        html += "<div class=\"diff-section\"><h3>标题变化</h3>";
+        html += "<div class=\"diff-removed\"><span class=\"diff-label\">- 旧标题</span>"
+                + html_escape(art_a.title) + "</div>";
+        html += "<div class=\"diff-added\"><span class=\"diff-label\">+ 新标题</span>"
+                + html_escape(art_b.title) + "</div>";
+        html += "</div>";
     }
 
     html += PAGE_FOOTER;
@@ -841,6 +1324,45 @@ static void handle_request(QueryEngine& qe, int csock) {
             return;
         }
         response = build_host(qe, host);
+        send_response(csock, code, content_type, response, req.accepts_gzip);
+    }
+    else if (req.path == "/random") {
+        std::string url = qe.get_random_url();
+        if (url.empty()) {
+            send_redirect(csock, "/");
+        } else {
+            send_redirect(csock, "/replay?url=" + url_encode(url));
+        }
+        close(csock);
+        return;
+    }
+    else if (req.path == "/sitemap") {
+        std::string host = get_param(req.query, "h");
+        if (host.empty()) {
+            send_redirect(csock, "/");
+            close(csock);
+            return;
+        }
+        response = build_sitemap(qe, host);
+        send_response(csock, code, content_type, response, req.accepts_gzip);
+    }
+    else if (req.path == "/browse") {
+        std::string date_str = get_param(req.query, "d");
+        response = build_browse(qe, date_str);
+        send_response(csock, code, content_type, response, req.accepts_gzip);
+    }
+    else if (req.path == "/diff") {
+        std::string url = get_param(req.query, "url");
+        std::string a_str = get_param(req.query, "a");
+        std::string b_str = get_param(req.query, "b");
+        if (url.empty() || a_str.empty() || b_str.empty()) {
+            send_redirect(csock, "/");
+            close(csock);
+            return;
+        }
+        uint32_t da = static_cast<uint32_t>(atoi(a_str.c_str()));
+        uint32_t db = static_cast<uint32_t>(atoi(b_str.c_str()));
+        response = build_diff(qe, url, da, db);
         send_response(csock, code, content_type, response, req.accepts_gzip);
     }
     else if (req.path == "/ping") {

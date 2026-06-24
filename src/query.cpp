@@ -9,11 +9,13 @@
 #include "common.h"
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <cstring>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <map>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -164,6 +166,7 @@ public:
         : data_dir_(data_dir), index_dir_(index_dir), reader_(data_dir) {}
 
     bool init() {
+        srand(static_cast<unsigned>(time(nullptr)) ^ static_cast<unsigned>(getpid()));
         for (int i = 0; i < NUM_SHARDS; i++) {
             char path[256];
             snprintf(path, sizeof(path), "%s/url_%02d.idx", index_dir_.c_str(), i);
@@ -400,4 +403,177 @@ public:
             }
         }
     }
+
+    // ── Top hosts by entry count ───────────────────────────
+
+    std::vector<std::pair<std::string, uint32_t>> get_top_hosts(int limit = 15) {
+        std::vector<std::pair<std::string, uint32_t>> hosts;
+        for (int sid = 0; sid < NUM_SHARDS; sid++) {
+            auto& shard = shards_[sid];
+            if (!shard.data) continue;
+            for (uint32_t i = 0; i < shard.header->host_count; i++) {
+                std::string name(shard.hosts[i].host, strnlen(shard.hosts[i].host, HOST_HASH_LEN));
+                hosts.emplace_back(name, shard.hosts[i].entry_count);
+            }
+        }
+        std::sort(hosts.begin(), hosts.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+        if (hosts.size() > static_cast<size_t>(limit))
+            hosts.resize(limit);
+        return hosts;
+    }
+
+    // ── Random URL ─────────────────────────────────────────
+
+    std::string get_random_url() {
+        // Pick a random shard, then random entry within it
+        std::vector<int> valid_shards;
+        for (int sid = 0; sid < NUM_SHARDS; sid++)
+            if (shards_[sid].data && shards_[sid].header->entry_count > 0)
+                valid_shards.push_back(sid);
+        if (valid_shards.empty()) return "";
+
+        int sid = valid_shards[rand() % valid_shards.size()];
+        auto& shard = shards_[sid];
+        uint32_t idx = rand() % shard.header->entry_count;
+        auto& ent = shard.entries[idx];
+
+        if (shard.is_v2 && shard.url_pool)
+            return entry_url(ent, shard.url_pool);
+        // v1 fallback
+        return reader_.read_article(data_path(ent.crawl_date),
+            ent.file_offset, std::min<uint32_t>(ent.record_size,
+                ArticleRecord::HEADER_SIZE + 1024u)).url;
+    }
+
+    // ── Year distribution (cached) ─────────────────────────
+
+    struct YearCount {
+        uint32_t year;
+        uint32_t count;
+    };
+    std::vector<YearCount> get_year_distribution() {
+        if (!year_dist_cached_.empty()) return year_dist_cached_;
+
+        std::map<uint32_t, uint32_t> ymap;
+        for (int sid = 0; sid < NUM_SHARDS; sid++) {
+            auto& shard = shards_[sid];
+            if (!shard.data) continue;
+            for (uint32_t i = 0; i < shard.header->entry_count; i++) {
+                uint32_t y = shard.entries[i].crawl_date / 10000;
+                ymap[y]++;
+            }
+        }
+        for (auto& kv : ymap)
+            year_dist_cached_.push_back({kv.first, kv.second});
+        return year_dist_cached_;
+    }
+
+    // ── Today in history ───────────────────────────────────
+
+    std::vector<std::string> get_today_in_history(uint32_t mmdd, int limit = 10) {
+        std::vector<std::string> urls;
+        if (mmdd < 101 || mmdd > 1231) return urls;
+
+        // Scan: collect entries matching MMDD, preference newer years
+        struct Candidate {
+            std::string url;
+            uint32_t date;
+        };
+        std::vector<Candidate> candidates;
+
+        for (int sid = 0; sid < NUM_SHARDS && candidates.size() < 5000; sid++) {
+            auto& shard = shards_[sid];
+            if (!shard.data) continue;
+            for (uint32_t i = 0; i < shard.header->entry_count &&
+                 candidates.size() < 5000; i++) {
+                auto& ent = shard.entries[i];
+                if ((ent.crawl_date % 10000) == mmdd) {
+                    std::string url;
+                    if (shard.is_v2 && shard.url_pool)
+                        url = entry_url(ent, shard.url_pool);
+                    else {
+                        url = reader_.read_article(data_path(ent.crawl_date),
+                            ent.file_offset, std::min<uint32_t>(ent.record_size,
+                                ArticleRecord::HEADER_SIZE + 1024u)).url;
+                    }
+                    if (!url.empty())
+                        candidates.push_back({url, ent.crawl_date});
+                }
+            }
+        }
+
+        // Sort by date DESC (newer first), dedup URLs, take limit
+        std::sort(candidates.begin(), candidates.end(),
+            [](const auto& a, const auto& b) { return a.date > b.date; });
+
+        std::string last;
+        for (auto& c : candidates) {
+            if (c.url == last) continue;
+            last = c.url;
+            urls.push_back(c.url);
+            if (urls.size() >= static_cast<size_t>(limit)) break;
+        }
+        return urls;
+    }
+
+    // ── Browse by date ─────────────────────────────────────
+
+    std::vector<UrlWithDate> get_by_date(uint32_t date, int limit = 200) {
+        std::vector<UrlWithDate> results;
+        for (int sid = 0; sid < NUM_SHARDS && results.size() < static_cast<size_t>(limit); sid++) {
+            auto& shard = shards_[sid];
+            if (!shard.data) continue;
+            for (uint32_t i = 0; i < shard.header->entry_count &&
+                 results.size() < static_cast<size_t>(limit); i++) {
+                auto& ent = shard.entries[i];
+                if (ent.crawl_date == date) {
+                    std::string url;
+                    if (shard.is_v2 && shard.url_pool)
+                        url = entry_url(ent, shard.url_pool);
+                    else {
+                        url = reader_.read_article(data_path(ent.crawl_date),
+                            ent.file_offset, std::min<uint32_t>(ent.record_size,
+                                ArticleRecord::HEADER_SIZE + 1024u)).url;
+                    }
+                    if (!url.empty())
+                        results.push_back({url, ent.crawl_date});
+                }
+            }
+        }
+        return results;
+    }
+
+    // ── Get article by exact URL + date (for diff) ─────────
+
+    ArticleReader::Article get_page_by_date(const std::string& url, uint32_t date) {
+        std::string host = extract_host(url);
+        int sid = shard_for_host(host);
+        if (sid < 0 || sid >= NUM_SHARDS) return {};
+
+        auto& shard = shards_[sid];
+        if (!shard.data) return {};
+
+        auto* hb = find_host(shard.hosts, shard.header->host_count, host);
+        if (!hb) return {};
+
+        uint64_t hash = ::url_hash(url);
+        const UrlIndexEntry* block = shard.entries + hb->first_entry;
+        auto* first = find_first(block, hb->entry_count, hash);
+        if (!first) return {};
+
+        uint32_t idx = static_cast<uint32_t>(first - block);
+        while (idx < hb->entry_count && block[idx].url_hash == hash) {
+            if (block[idx].crawl_date == date) {
+                auto& ent = block[idx];
+                return reader_.read_article(data_path(ent.crawl_date),
+                    ent.file_offset, ent.record_size);
+            }
+            idx++;
+        }
+        return {};
+    }
+
+private:
+    mutable std::vector<YearCount> year_dist_cached_;
 };
