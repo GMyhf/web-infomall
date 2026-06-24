@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <sstream>
 #include <ctime>
+#include <map>
 #include <sys/time.h>
 #include <zlib.h>
 
@@ -130,8 +131,50 @@ static const char* PAGE_HEADER =
     ".nav-links a:hover{background:var(--info-soft);text-decoration:none}"
     "footer{text-align:center;padding:32px;color:#8b8175;font-size:.82rem}"
     ".badge{display:inline-flex;align-items:center;padding:3px 8px;background:var(--info-soft);color:var(--brand-2);border:1px solid #c9dcd8;border-radius:999px;font-size:.78rem;font-weight:650;margin-left:6px;vertical-align:middle}"
-    "@media(max-width:720px){header{padding:16px}.header-inner{display:block}.system-badge{margin-top:10px;white-space:normal}.container{padding:20px 14px 32px}.search-bar{padding:12px}.search-bar form{flex-direction:column}.search-bar button{width:100%%}.page-view{padding:20px;margin:14px 0}.page-view h2{font-size:1.32rem}.page-meta{grid-template-columns:1fr}.page-body{font-size:1rem;line-height:1.88}.stats{grid-template-columns:1fr 1fr}}"
-    "@media(max-width:420px){.stats{grid-template-columns:1fr}header h1{font-size:1.08rem}.container{padding-left:12px;padding-right:12px}.result-item{padding:13px 14px}.quick-links a{max-width:100%%;overflow-wrap:anywhere}.page-view{padding:16px}.page-body{font-size:.98rem;line-height:1.82}}"
+    /* Timeline (calendar page) */
+    ".timeline{position:relative;padding:24px 0 16px 40px;margin:20px 0}"
+    ".timeline::before{content:\"\";position:absolute;left:16px;top:0;bottom:0;width:3px;background:linear-gradient(180deg,var(--brand),#8db5b9 50%%,#d4cfc2)}"
+    ".tl-item{position:relative;padding:10px 0 10px 28px;margin-bottom:4px;border-radius:6px;transition:background .15s}"
+    ".tl-item:hover{background:var(--surface-2)}"
+    ".tl-item::before{content:\"\";position:absolute;left:-27px;top:18px;width:12px;height:12px;border-radius:50%%;background:var(--brand);border:2px solid #fff;box-shadow:0 0 0 2px var(--brand)}"
+    ".tl-item:first-child::before{background:var(--accent);box-shadow:0 0 0 2px var(--accent)}"
+    ".tl-item a{font-weight:650;font-size:1.02rem}"
+    ".tl-item .tl-date{display:inline-block;min-width:90px;color:var(--brand-2);font-weight:700;font-size:.92rem}"
+    ".tl-item .tl-count{color:var(--muted);font-size:.82rem;margin-left:6px}"
+    ".tl-year-marker{position:relative;padding:8px 0 4px 28px;margin-top:8px}"
+    ".tl-year-marker::before{content:\"\";position:absolute;left:-31px;top:12px;width:20px;height:20px;border-radius:50%%;background:var(--accent-soft);border:3px solid var(--accent)}"
+    ".tl-year-marker .tl-year{font-weight:750;color:var(--accent);font-size:1.05rem}"
+    /* Metadata panel (replay page) */
+    ".meta-panel{border:1px solid var(--line);border-radius:8px;margin:20px 0;overflow:hidden}"
+    ".meta-panel summary{padding:12px 18px;background:var(--surface-2);cursor:pointer;font-size:.9rem;font-weight:650;color:var(--muted);user-select:none;list-style:none}"
+    ".meta-panel summary::-webkit-details-marker{display:none}"
+    ".meta-panel summary::before{content:\"▸ \";display:inline-block;transition:transform .2s;margin-right:4px}"
+    ".meta-panel[open] summary::before{transform:rotate(90deg)}"
+    ".meta-panel .meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;padding:16px 18px}"
+    ".meta-panel .meta-cell{font-size:.85rem}.meta-cell .mk{color:#7b7166;font-size:.74rem;font-weight:700;display:block}.meta-cell .mv{color:#344054;margin-top:2px}"
+    /* Recommendations (replay page) */
+    ".rec-section{margin-top:32px;padding-top:20px;border-top:1px solid var(--line)}"
+    ".rec-section h3{font-size:.95rem;color:#344054;margin-bottom:12px}"
+    ".rec-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}"
+    ".rec-card{background:var(--surface);padding:12px 14px;border-radius:6px;border:1px solid var(--line);transition:border-color .15s,background .15s}"
+    ".rec-card:hover{border-color:var(--brand);background:#fff}"
+    ".rec-card a{font-size:.88rem;font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+    ".rec-card .rec-date{font-size:.78rem;color:var(--muted);margin-top:3px}"
+    /* Host overview page */
+    ".host-hero{background:var(--surface);padding:24px 28px;border-radius:10px;border:1px solid var(--line);box-shadow:var(--shadow);margin:16px 0}"
+    ".host-hero h2{font-size:1.6rem;margin-bottom:4px;color:var(--brand);overflow-wrap:anywhere}"
+    ".host-hero .host-url-count{color:var(--muted);font-size:.9rem;margin-top:6px}"
+    ".host-stats-row{display:flex;gap:24px;flex-wrap:wrap;margin-top:16px}"
+    ".host-stat{text-align:center;min-width:90px}"
+    ".host-stat .hs-num{font-size:1.5rem;font-weight:760;color:var(--brand)}"
+    ".host-stat .hs-lbl{font-size:.78rem;color:var(--muted);margin-top:2px}"
+    ".year-chart{display:flex;gap:2px;align-items:flex-end;height:48px;margin-top:16px;padding:0 2px}"
+    ".year-bar{flex:1;min-width:4px;background:var(--brand);border-radius:2px 2px 0 0;opacity:.55;transition:opacity .15s;position:relative}"
+    ".year-bar:hover{opacity:1}"
+    ".year-bar .yb-tip{display:none;position:absolute;bottom:calc(100%% + 6px);left:50%%;transform:translateX(-50%%);background:#333;color:#fff;padding:3px 7px;border-radius:4px;font-size:.72rem;white-space:nowrap;z-index:1}"
+    ".year-bar:hover .yb-tip{display:block}"
+    "@media(max-width:720px){header{padding:16px}.header-inner{display:block}.system-badge{margin-top:10px;white-space:normal}.container{padding:20px 14px 32px}.search-bar{padding:12px}.search-bar form{flex-direction:column}.search-bar button{width:100%%}.page-view{padding:20px;margin:14px 0}.page-view h2{font-size:1.32rem}.page-meta{grid-template-columns:1fr}.page-body{font-size:1rem;line-height:1.88}.stats{grid-template-columns:1fr 1fr}.rec-grid{grid-template-columns:1fr}.timeline{padding-left:32px}.timeline::before{left:12px}.tl-item::before{left:-23px;width:10px;height:10px}.host-hero{padding:18px}}"
+    "@media(max-width:420px){.stats{grid-template-columns:1fr}header h1{font-size:1.08rem}.container{padding-left:12px;padding-right:12px}.result-item{padding:13px 14px}.quick-links a{max-width:100%%;overflow-wrap:anywhere}.page-view{padding:16px}.page-body{font-size:.98rem;line-height:1.82}.host-stats-row{gap:12px}.host-stat{min-width:60px}}"
     "</style></head><body>"
     "<header><div class=\"header-inner\"><div><h1><a href=\"/\">Web InfoMall — 历史网页回放</a></h1>"
     "<p>中国网页信息博物馆 · Archive Replay</p></div><span class=\"system-badge\">v2 · Threaded</span></div></header><div class=\"container\">";
@@ -332,9 +375,12 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
     auto urls = qe.get_host_urls(query, 100);
     if (!urls.empty()) {
         char buf[256];
-        snprintf(buf, sizeof(buf), "<h3 class=\"result-summary\">域名 <strong>%s</strong> 下有 %zu 个页面</h3>",
-                 html_escape(query).c_str(), urls.size());
+        snprintf(buf, sizeof(buf), "<h3 class=\"result-summary\">域名 <strong><a href=\"/host?h=%s\">%s</a></strong> 下有 %zu 个页面</h3>",
+                 url_encode(query).c_str(), html_escape(query).c_str(), urls.size());
         html += buf;
+        // "Browse all" link
+        html += "<div class=\"nav-links\" style=\"margin-bottom:12px\">"
+                "<a href=\"/host?h=" + url_encode(query) + "\">查看域名概览 →</a></div>";
         for (auto& u : urls) {
             html += "<div class=\"result-item\"><a href=\"/replay?url=" + url_encode(u.url) + "\">"
                     + html_escape(u.url) + "</a>";
@@ -349,7 +395,7 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
             html += buf;
             for (auto& h : hosts) {
                 html += "<div class=\"result-item\">"
-                        "<a href=\"/search?q=" + url_encode(h.first) + "\">"
+                        "<a href=\"/host?h=" + url_encode(h.first) + "\">"
                         + html_escape(h.first) + "</a>"
                         "<span class=\"badge\">" + std::to_string(h.second) + " 页</span></div>";
             }
@@ -385,53 +431,138 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
     snprintf(buf, sizeof(buf), PAGE_HEADER, html_escape(art.title).c_str());
     std::string html(buf);
 
+    std::string host = extract_host(url);
     html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
-            "<a href=\"/calendar?url=" + url_encode(url) + "\">查看所有版本</a></div>";
+            "<a href=\"/calendar?url=" + url_encode(url) + "\">查看所有版本</a>"
+            "<a href=\"/host?h=" + url_encode(host) + "\">此域名下其他页面</a></div>";
 
     html += "<div class=\"page-view\"><h2>"
             + html_escape(art.title.empty() ? "(无标题)" : art.title) + "</h2>";
     html += "<div class=\"page-meta\">"
             "<div class=\"meta-item\"><span class=\"meta-label\">URL</span>"
-            "<span class=\"meta-value\">" + html_escape(url) + "</span></div>"
+            "<span class=\"meta-value\"><a href=\"" + html_escape(url) + "\">"
+            + html_escape(url) + "</a></span></div>"
             "<div class=\"meta-item\"><span class=\"meta-label\">存档时间</span>"
             "<span class=\"meta-value\">" + fmt_date(art.date) + "</span></div>"
             "<div class=\"meta-item\"><span class=\"meta-label\">站点</span>"
-            "<span class=\"meta-value\">" + html_escape(extract_host(url)) + "</span></div>"
+            "<span class=\"meta-value\"><a href=\"/host?h=" + url_encode(host) + "\">"
+            + html_escape(host) + "</a></span></div>"
             "</div>";
 
     auto vers = qe.get_versions(url);
     if (vers.size() > 1) {
         snprintf(buf, sizeof(buf),
             "<div class=\"notice\">此 URL 共有 <strong>%zu</strong> 个历史版本。"
-            "<a href=\"/calendar?url=%s\">查看 →</a></div>",
+            "<a href=\"/calendar?url=%s\">查看所有版本 →</a></div>",
             vers.size(), url_encode(url).c_str());
         html += buf;
     }
 
     html += "<div class=\"page-body\">"
             + html_escape(art.body.empty() ? "(无内容)" : art.body) + "</div>";
-    html += "</div>" + std::string(PAGE_FOOTER);
+
+    // Metadata panel: technical details about the archived record
+    html += "<details class=\"meta-panel\"><summary>📋 存档详情</summary><div class=\"meta-grid\">";
+    snprintf(buf, sizeof(buf),
+        "<div class=\"meta-cell\"><span class=\"mk\">存档日期</span><span class=\"mv\">%s</span></div>"
+        "<div class=\"meta-cell\"><span class=\"mk\">站点域名</span><span class=\"mv\">%s</span></div>"
+        "<div class=\"meta-cell\"><span class=\"mk\">URL 路径</span><span class=\"mv\">%s</span></div>",
+        fmt_date(art.date).c_str(),
+        html_escape(host).c_str(),
+        html_escape(url.substr(url.find(host) + host.size())).c_str());
+    html += buf;
+
+    // Version stats
+    snprintf(buf, sizeof(buf),
+        "<div class=\"meta-cell\"><span class=\"mk\">历史版本数</span><span class=\"mv\">%zu</span></div>"
+        "<div class=\"meta-cell\"><span class=\"mk\">正文长度</span><span class=\"mv\">%zu 字符</span></div>"
+        "<div class=\"meta-cell\"><span class=\"mk\">编码转换</span><span class=\"mv\">GB2312 → UTF-8</span></div>",
+        vers.size(), art.body.size());
+    html += buf;
+    html += "</div></details>";
+
+    html += "</div>"; // close page-view
+
+    // Same-domain recommendations
+    auto host_urls = qe.get_host_urls(host, 9);
+    int rec_count = 0;
+    html += "<section class=\"rec-section\"><h3>📂 「" + html_escape(host)
+            + "」下的其他页面</h3><div class=\"rec-grid\">";
+    for (auto& hu : host_urls) {
+        if (hu.url == url) continue;  // skip current page
+        if (++rec_count > 8) break;
+        html += "<div class=\"rec-card\"><a href=\"/replay?url=" + url_encode(hu.url) + "\">"
+                + html_escape(hu.url) + "</a>"
+                "<div class=\"rec-date\">" + fmt_date(hu.date) + "</div></div>";
+    }
+    if (rec_count == 0) {
+        html += "<div class=\"meta\">此域名下暂无其他页面。</div>";
+    }
+    html += "</div></section>";
+
+    html += PAGE_FOOTER;
     return html;
 }
 
 static std::string build_calendar(QueryEngine& qe, const std::string& url) {
     auto vers = qe.get_versions(url);
+    std::string host = extract_host(url);
 
     char buf[32768];
     snprintf(buf, sizeof(buf), PAGE_HEADER, "版本历史");
     std::string html(buf);
 
     html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
-            "<a href=\"/replay?url=" + url_encode(url) + "\">查看最新版本</a></div>";
+            "<a href=\"/replay?url=" + url_encode(url) + "\">查看最新版本</a>"
+            "<a href=\"/host?h=" + url_encode(host) + "\">域名概览</a></div>";
 
     html += "<h2>版本历史</h2>";
     html += "<div class=\"result-item\"><strong>URL:</strong> "
             + html_escape(url) + "<br><strong>站点:</strong> "
-            + html_escape(extract_host(url)) + "<br><strong>版本数:</strong> "
-            + std::to_string(vers.size()) + "</div>";
+            "<a href=\"/host?h=" + url_encode(host) + "\">" + html_escape(host) + "</a>"
+            + "<br><strong>版本数:</strong> " + std::to_string(vers.size()) + "</div>";
 
     if (!vers.empty()) {
-        html += "<h3>所有版本</h3>";
+        // Compute time span stats
+        uint32_t earliest = vers.back().date;
+        uint32_t latest = vers.front().date;
+        uint32_t span_years = (latest / 10000) - (earliest / 10000);
+
+        // Stats row
+        snprintf(buf, sizeof(buf),
+            "<div class=\"stats\" style=\"margin:16px 0\">"
+            "<div class=\"stat-card\"><div class=\"number\">%zu</div><div class=\"label\">历史版本</div></div>"
+            "<div class=\"stat-card\"><div class=\"number\">%s</div><div class=\"label\">最早存档</div></div>"
+            "<div class=\"stat-card\"><div class=\"number\">%s</div><div class=\"label\">最新存档</div></div>"
+            "<div class=\"stat-card\"><div class=\"number\">%u 年</div><div class=\"label\">时间跨度</div></div>"
+            "</div>",
+            vers.size(), fmt_date(earliest).c_str(), fmt_date(latest).c_str(), span_years);
+        html += buf;
+
+        // CSS timeline
+        html += "<h3>存档时间线</h3><div class=\"timeline\">";
+        uint32_t last_year = 0;
+        for (auto& v : vers) {
+            uint32_t year = v.date / 10000;
+            // Year marker
+            if (year != last_year) {
+                last_year = year;
+                snprintf(buf, sizeof(buf),
+                    "<div class=\"tl-year-marker\"><span class=\"tl-year\">%u 年</span></div>", year);
+                html += buf;
+            }
+            html += "<div class=\"tl-item\">"
+                    "<a href=\"/replay?url=" + url_encode(url) + "&date="
+                    + std::to_string(v.date) + "\">"
+                    "<span class=\"tl-date\">" + fmt_date(v.date) + "</span></a>";
+            if (v.record_count > 1)
+                html += "<span class=\"tl-count\">(" + std::to_string(v.record_count) + " 条记录)</span>";
+            html += "</div>";
+        }
+        html += "</div>";
+
+        // Compact table view as secondary option
+        html += "<h3 style=\"margin-top:24px\">列表视图</h3>";
         for (auto& v : vers) {
             html += "<div class=\"result-item\">"
                     "<a href=\"/replay?url=" + url_encode(url) + "&date="
@@ -440,6 +571,102 @@ static std::string build_calendar(QueryEngine& qe, const std::string& url) {
                 html += " <span class=\"badge\">" + std::to_string(v.record_count) + " 条</span>";
             html += "</div>";
         }
+    }
+
+    html += PAGE_FOOTER;
+    return html;
+}
+
+// ── Host Overview ──────────────────────────────────────────────
+
+static std::string build_host(QueryEngine& qe, const std::string& host) {
+    auto urls = qe.get_host_urls(host, 500);
+
+    char buf[32768];
+    std::string title = "域名: " + host;
+    snprintf(buf, sizeof(buf), PAGE_HEADER, html_escape(title).c_str());
+    std::string html(buf);
+
+    html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
+            "<a href=\"/search?q=" + url_encode(host) + "\">搜索此域名</a></div>";
+
+    if (urls.empty()) {
+        html += "<div class=\"notice\"><strong>未找到域名。</strong><br>"
+                "域名 <code>" + html_escape(host) + "</code> 在归档中不存在。<br>"
+                "请检查拼写，或尝试搜索域名片段。</div>";
+        html += "<section class=\"search-panel\"><div class=\"search-bar\">"
+                "<form action=\"/search\" method=\"get\">"
+                "<input type=\"text\" name=\"q\" value=\"" + html_escape(host) + "\">"
+                "<button>搜索</button></form></div></section>";
+        html += PAGE_FOOTER;
+        return html;
+    }
+
+    // Compute stats
+    uint32_t date_min = UINT32_MAX, date_max = 0;
+    int unique_urls = 0;
+    std::string last_url;
+    std::map<uint32_t, int> year_counts;
+    for (auto& u : urls) {
+        if (u.date < date_min) date_min = u.date;
+        if (u.date > date_max) date_max = u.date;
+        if (u.url != last_url) { unique_urls++; last_url = u.url; }
+        year_counts[u.date / 10000]++;
+    }
+
+    // Hero section
+    html += "<div class=\"host-hero\"><h2>🌐 " + html_escape(host) + "</h2>";
+    snprintf(buf, sizeof(buf),
+        "<div class=\"host-url-count\">%d 个不重复 URL · %zu 条存档记录 · %s — %s</div>",
+        unique_urls, urls.size(), fmt_date(date_min).c_str(), fmt_date(date_max).c_str());
+    html += buf;
+
+    // Stat cards
+    html += "<div class=\"host-stats-row\">";
+    snprintf(buf, sizeof(buf),
+        "<div class=\"host-stat\"><div class=\"hs-num\">%d</div><div class=\"hs-lbl\">不重复 URL</div></div>"
+        "<div class=\"host-stat\"><div class=\"hs-num\">%zu</div><div class=\"hs-lbl\">总存档数</div></div>"
+        "<div class=\"host-stat\"><div class=\"hs-num\">%s</div><div class=\"hs-lbl\">最早</div></div>"
+        "<div class=\"host-stat\"><div class=\"hs-num\">%s</div><div class=\"hs-lbl\">最新</div></div>"
+        "<div class=\"host-stat\"><div class=\"hs-num\">%zu</div><div class=\"hs-lbl\">覆盖年份</div></div>",
+        unique_urls, urls.size(), fmt_date(date_min).c_str(), fmt_date(date_max).c_str(),
+        year_counts.size());
+    html += buf;
+    html += "</div>";
+
+    // Year distribution mini-chart
+    if (year_counts.size() >= 2) {
+        int max_count = 0;
+        for (auto& yc : year_counts) if (yc.second > max_count) max_count = yc.second;
+        html += "<div style=\"margin-top:14px\"><span style=\"font-size:.82rem;color:#7b7166;font-weight:700\">按年份分布</span>";
+        html += "<div class=\"year-chart\">";
+        for (auto& yc : year_counts) {
+            int pct = max_count > 0 ? (yc.second * 100 / max_count) : 0;
+            if (pct < 3) pct = 3;
+            snprintf(buf, sizeof(buf),
+                "<div class=\"year-bar\" style=\"height:%d%%\">"
+                "<span class=\"yb-tip\">%u: %d 篇</span></div>",
+                pct, yc.first, yc.second);
+            html += buf;
+        }
+        html += "</div></div>";
+    }
+    html += "</div>"; // host-hero
+
+    // URL listing
+    html += "<h3 style=\"margin-top:20px\">页面列表</h3>";
+    last_url.clear();
+    int shown = 0;
+    for (auto& u : urls) {
+        if (u.url == last_url) continue;  // dedup URLs, show first occurrence
+        last_url = u.url;
+        if (++shown > 200) {
+            html += "<div class=\"result-item\"><span class=\"meta\">... 还有更多页面，请使用搜索功能缩小范围。</span></div>";
+            break;
+        }
+        html += "<div class=\"result-item\"><a href=\"/replay?url=" + url_encode(u.url) + "\">"
+                + html_escape(u.url) + "</a>";
+        html += " <span class=\"meta\">" + fmt_date(u.date) + "</span></div>";
     }
 
     html += PAGE_FOOTER;
@@ -604,6 +831,16 @@ static void handle_request(QueryEngine& qe, int csock) {
     else if (req.path == "/calendar") {
         std::string url = get_param(req.query, "url");
         response = url.empty() ? build_home(qe) : build_calendar(qe, url);
+        send_response(csock, code, content_type, response, req.accepts_gzip);
+    }
+    else if (req.path == "/host") {
+        std::string host = get_param(req.query, "h");
+        if (host.empty()) {
+            send_redirect(csock, "/");
+            close(csock);
+            return;
+        }
+        response = build_host(qe, host);
         send_response(csock, code, content_type, response, req.accepts_gzip);
     }
     else if (req.path == "/ping") {

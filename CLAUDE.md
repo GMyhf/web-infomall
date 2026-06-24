@@ -92,6 +92,18 @@ char url_pool[url_pool_size]   (concatenated URLs, each entry points via url_off
 - **gzip compression**: Responses > 1KB are compressed if `Accept-Encoding: gzip` is present and savings ≥ 5%.
 - **Cache headers**: `ETag` (url_hash + date), `Last-Modified` (crawl date), `Cache-Control: public, max-age=86400`. Supports `If-None-Match` → `304 Not Modified`.
 
+### HTTP routes
+
+| Route | Description |
+|-------|-------------|
+| `/` | Home page with stats and search |
+| `/search?q=<term>` | Search by URL prefix or host substring |
+| `/replay?url=<url>[&date=YYYYMMDD]` | Replay a specific archived page |
+| `/calendar?url=<url>` | Version history with CSS timeline |
+| `/host?h=<domain>` | Domain overview: stats, year chart, URL listing |
+| `/stats` | JSON API: total articles, hosts, date range |
+| `/ping` | Health check (plain text "pong") |
+
 ### Sharding strategy
 
 - **37 shards** (prime number, following Depot's pattern).
