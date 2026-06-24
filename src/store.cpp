@@ -160,28 +160,3 @@ private:
         current_size_ = ftell(current_file_);
     }
 };
-
-// ── Test ──────────────────────────────────────────────────────
-#ifdef STORE_TEST
-#include "parser.cpp"
-
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <dat_file>\n", argv[0]);
-        return 1;
-    }
-    DataStore store("test_archive");
-    ArticleParser parser;
-
-    int count = parser.parse_file(argv[1], 1000, [&](auto& art) {
-        uint32_t date = static_cast<uint32_t>(atoi(art.time.c_str()));
-        auto loc = store.write_article(art.url, date, art.title, art.body);
-        if (count % 100 == 0) {
-            printf("  Wrote: %s offset=%lld size=%u\n",
-                   loc.file_path.c_str(), (long long)loc.offset, loc.size);
-        }
-    });
-    printf("Stored %d articles\n", count);
-    return 0;
-}
-#endif

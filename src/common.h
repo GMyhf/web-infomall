@@ -17,10 +17,13 @@
 // ── Constants ─────────────────────────────────────────────────
 
 constexpr uint32_t ARTICLE_MAGIC   = 0x494E464F;  // "INFO"
-constexpr uint32_t SHARD_MAGIC     = 0x49445820;  // "IDX "
+constexpr uint32_t SHARD_MAGIC_V1  = 0x49445820;  // "IDX " (original format)
+constexpr uint32_t SHARD_MAGIC     = 0x49445821;  // "IDX!" (v2: URL pool embedded)
 constexpr int      NUM_SHARDS      = 37;           // Prime, ~Depot's 39
 constexpr int      HOST_HASH_LEN   = 32;
 constexpr int64_t  MAX_DAT_FILE    = 2LL * 1024 * 1024 * 1024; // 2GB
+constexpr uint32_t MAX_URL_LEN     = 2048;         // Max URL length stored inline
+constexpr uint32_t URL_PREFIX_LEN  = 64;           // For prefix search optimization
 
 // ── Article Storage Format ────────────────────────────────────
 
@@ -55,13 +58,15 @@ struct ArticleRecord {
 
 #pragma pack(push, 1)
 struct UrlIndexEntry {
-    uint64_t url_hash;       // first 8 bytes of MD5(URL) — sort key
+    uint64_t url_hash;       // first 8 bytes of FNV-1a(URL) — sort key
     uint32_t crawl_date;     // YYYYMMDD — secondary sort (DESC)
-    int64_t  file_offset;    // byte offset in the data file
-    uint32_t record_size;    // for quick reading
-    uint8_t  shard_id;       // which shard (redundant, for debug)
-    uint8_t  _pad[3];
-    // Total: 8 + 4 + 8 + 4 + 1 + 3 = 28 bytes
+    uint32_t file_offset;    // byte offset in the data file (fits ≤2GB)
+    uint16_t record_size;    // record size in data file
+    uint16_t url_len;        // URL length stored in string pool
+    uint32_t url_offset;     // byte offset into URL string pool (at end of shard)
+    uint32_t reserved;       // for future use
+    // Total: 8 + 4 + 4 + 2 + 2 + 4 + 4 = 28 bytes (unchanged size)
+    // In v2+ shard files, the URL is at: url_pool_base + url_offset
 };
 #pragma pack(pop)
 
@@ -80,13 +85,14 @@ struct HostBlock {
 
 #pragma pack(push, 1)
 struct ShardFileHeader {
-    uint32_t magic;          // SHARD_MAGIC
+    uint32_t magic;          // SHARD_MAGIC (v2) or SHARD_MAGIC_V1 (legacy)
     uint32_t entry_count;    // number of UrlIndexEntry records
     uint32_t host_count;     // number of HostBlock records
-    uint32_t reserved;
+    uint32_t url_pool_size;  // size of URL string pool in bytes (0 in v1)
     // Followed by:
     //   HostBlock hosts[host_count]      (sorted by host)
-    //   UrlIndexEntry entries[entry_count] (sorted by url_hash, crawl_date DESC)
+    //   UrlIndexEntry entries[entry_count] (sorted by host, url_hash, crawl_date DESC)
+    //   char url_pool[url_pool_size]      (concatenated null-terminated URLs)
 };
 #pragma pack(pop)
 
@@ -185,6 +191,36 @@ inline const UrlIndexEntry* find_first(const UrlIndexEntry* entries, uint32_t co
         else hi = mid;
     }
     return (lo < static_cast<int>(count) && entries[lo].url_hash == hash) ? &entries[lo] : nullptr;
+}
+
+// Get URL string from v2 shard's URL pool
+inline std::string entry_url(const UrlIndexEntry& e, const char* url_pool) {
+    if (!url_pool || e.url_len == 0) return "";
+    return std::string(url_pool + e.url_offset, e.url_len);
+}
+
+// Check if entry's URL starts with prefix (from v2 URL pool)
+inline bool entry_url_has_prefix(const UrlIndexEntry& e, const char* url_pool,
+                                  const std::string& prefix) {
+    if (!url_pool || e.url_len < prefix.size()) return false;
+    return memcmp(url_pool + e.url_offset, prefix.data(), prefix.size()) == 0;
+}
+
+// Check if entry's host (extracted from URL in pool) contains substr
+// For search_host_substring: does URL's host part match?
+inline bool entry_host_contains(const UrlIndexEntry& e, const char* url_pool,
+                                 const std::string& substr) {
+    if (!url_pool || e.url_len == 0) return false;
+    std::string_view url(url_pool + e.url_offset, e.url_len);
+    // Extract host from URL
+    auto pos = url.find("://");
+    if (pos != std::string_view::npos) url.remove_prefix(pos + 3);
+    auto end = url.find_first_of("/:?");
+    std::string_view host = (end != std::string_view::npos) ? url.substr(0, end) : url;
+    // Case-insensitive substring search
+    auto it = std::search(host.begin(), host.end(), substr.begin(), substr.end(),
+        [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+    return it != host.end();
 }
 
 // Find HostBlock by hostname

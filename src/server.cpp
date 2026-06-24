@@ -1,7 +1,7 @@
 /*
- * server.cpp — Minimal HTTP replay server.
+ * server.cpp — Multi-threaded HTTP replay server with gzip compression.
  *
- * Pure POSIX sockets, no external dependencies.
+ * Pure POSIX sockets + std::thread, no external dependencies.
  * Uses QueryEngine for all data access.
  *
  * Usage: ./serve <data_dir> <index_dir> [port]
@@ -14,6 +14,11 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <functional>
+#include <condition_variable>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -21,6 +26,12 @@
 #include <sstream>
 #include <ctime>
 #include <sys/time.h>
+#include <zlib.h>
+
+// ── Concurrency ──────────────────────────────────────────────
+
+constexpr int THREAD_POOL_SIZE = 4;
+constexpr int LISTEN_BACKLOG   = 128;
 
 // ── HTML Helpers ──────────────────────────────────────────────
 
@@ -42,10 +53,12 @@ static std::string html_escape(const std::string& s) {
 static std::string url_encode(const std::string& s) {
     std::ostringstream os;
     for (char c : s) {
-        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == '/' || c == ':')
+        if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
+            c == '.' || c == '~' || c == '/' || c == ':')
             os << c;
         else {
-            os << '%' << std::hex << std::uppercase << (unsigned)(uint8_t)c;
+            os << '%' << std::hex << std::uppercase
+               << static_cast<unsigned int>(static_cast<uint8_t>(c));
         }
     }
     return os.str();
@@ -56,6 +69,16 @@ static std::string fmt_date(uint32_t d) {
     snprintf(buf, sizeof(buf), "%04u-%02u-%02u", d / 10000, (d / 100) % 100, d % 100);
     return buf;
 }
+
+static std::string http_date(time_t t) {
+    char buf[64];
+    struct tm tm_val;
+    gmtime_r(&t, &tm_val);
+    strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm_val);
+    return buf;
+}
+
+// ── Page templates (CSS embedded) ────────────────────────────
 
 static const char* PAGE_HEADER =
     "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
@@ -111,10 +134,10 @@ static const char* PAGE_HEADER =
     "@media(max-width:420px){.stats{grid-template-columns:1fr}header h1{font-size:1.08rem}.container{padding-left:12px;padding-right:12px}.result-item{padding:13px 14px}.quick-links a{max-width:100%%;overflow-wrap:anywhere}.page-view{padding:16px}.page-body{font-size:.98rem;line-height:1.82}}"
     "</style></head><body>"
     "<header><div class=\"header-inner\"><div><h1><a href=\"/\">Web InfoMall — 历史网页回放</a></h1>"
-    "<p>中国网页信息博物馆 · Archive Replay</p></div><span class=\"system-badge\">C++ Replay System · Phase 2</span></div></header><div class=\"container\">";
+    "<p>中国网页信息博物馆 · Archive Replay</p></div><span class=\"system-badge\">v2 · Threaded</span></div></header><div class=\"container\">";
 
 static const char* PAGE_FOOTER =
-    "</div><footer>Web InfoMall Archive Replay System · C++ Phase 2</footer></body></html>";
+    "</div><footer>Web InfoMall Archive Replay System · C++ Phase 2 v2</footer></body></html>";
 
 // ── URL Decode ────────────────────────────────────────────────
 
@@ -138,24 +161,55 @@ static std::string url_decode(const std::string& s) {
     return r;
 }
 
+// ── Gzip Compression ──────────────────────────────────────────
+
+static bool gzip_compress(const std::string& input, std::string& output) {
+    if (input.size() < 1024) return false; // Only compress if worth it
+
+    z_stream zs = {};
+    if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED,
+                     15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        return false;
+
+    zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+    zs.avail_in = static_cast<uInt>(input.size());
+
+    size_t bound = deflateBound(&zs, input.size());
+    output.resize(bound);
+
+    zs.next_out = reinterpret_cast<Bytef*>(output.data());
+    zs.avail_out = static_cast<uInt>(output.size());
+
+    int ret = deflate(&zs, Z_FINISH);
+    deflateEnd(&zs);
+
+    if (ret != Z_STREAM_END) return false;
+    output.resize(zs.total_out);
+    return output.size() < input.size() * 0.95; // Must save at least 5%
+}
+
 // ── HTTP Request Parser ───────────────────────────────────────
 
 struct HttpRequest {
     std::string method;
     std::string path;
     std::string query;
+    bool accepts_gzip = false;
+    std::string etag_if_none_match;
 };
 
 static HttpRequest parse_request(const char* data, size_t len) {
     HttpRequest req;
-    const char* end = (const char*)memchr(data, '\n', len);
-    if (!end) return req;
+    const char* cursor = data;
+    const char* end = data + len;
 
-    std::string line(data, end - data);
-    // Trim \r
-    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+    // Parse request line
+    const char* nl = static_cast<const char*>(memchr(cursor, '\n', end - cursor));
+    if (!nl) return req;
+    std::string line(cursor, nl - cursor);
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+        line.pop_back();
 
-    // "GET /path?query HTTP/1.1"
     size_t p1 = line.find(' ');
     if (p1 == std::string::npos) return req;
     size_t p2 = line.find(' ', p1 + 1);
@@ -163,13 +217,38 @@ static HttpRequest parse_request(const char* data, size_t len) {
 
     req.method = line.substr(0, p1);
     std::string full_path = line.substr(p1 + 1, p2 - p1 - 1);
-
     size_t q = full_path.find('?');
     if (q != std::string::npos) {
         req.path = full_path.substr(0, q);
         req.query = full_path.substr(q + 1);
     } else {
         req.path = full_path;
+    }
+
+    // Parse remaining headers
+    cursor = nl + 1;
+    while (cursor < end) {
+        nl = static_cast<const char*>(memchr(cursor, '\n', end - cursor));
+        if (!nl) break;
+        line.assign(cursor, nl - cursor);
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        cursor = nl + 1;
+        if (line.empty()) break; // end of headers
+
+        // Check Accept-Encoding
+        if (line.size() > 16 && strncasecmp(line.c_str(), "Accept-Encoding:", 16) == 0) {
+            req.accepts_gzip = (line.find("gzip") != std::string::npos);
+        }
+        // Check If-None-Match
+        if (line.size() > 14 && strncasecmp(line.c_str(), "If-None-Match:", 14) == 0) {
+            size_t vpos = line.find('"');
+            if (vpos != std::string::npos) {
+                size_t vend = line.find('"', vpos + 1);
+                if (vend != std::string::npos)
+                    req.etag_if_none_match = line.substr(vpos + 1, vend - vpos - 1);
+            }
+        }
     }
     return req;
 }
@@ -190,6 +269,16 @@ static std::string get_param(const std::string& query, const std::string& key) {
     return "";
 }
 
+// ── ETag Generation ───────────────────────────────────────────
+
+static std::string make_etag(const std::string& url, uint32_t date) {
+    char buf[64];
+    uint64_t h = url_hash(url);
+    snprintf(buf, sizeof(buf), "\"%llx-%u\"",
+             static_cast<unsigned long long>(h), date);
+    return buf;
+}
+
 // ── Page Builders ─────────────────────────────────────────────
 
 static std::string build_home(QueryEngine& qe) {
@@ -200,7 +289,6 @@ static std::string build_home(QueryEngine& qe) {
     snprintf(buf, sizeof(buf), PAGE_HEADER, "Web InfoMall — 首页");
     std::string html(buf);
 
-    // Search bar
     html += "<section class=\"search-panel\"><div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
             "<input type=\"text\" name=\"q\" placeholder=\"输入 URL 或域名搜索...\" autofocus>"
             "<button type=\"submit\">搜索</button></form></div>"
@@ -211,7 +299,6 @@ static std::string build_home(QueryEngine& qe) {
             "<a href=\"/search?q=news.sina.com.cn\">news.sina.com.cn</a>"
             "</div></section>";
 
-    // Stats
     html += "<div class=\"stats\">";
     snprintf(buf, sizeof(buf),
         "<div class=\"stat-card\"><div class=\"number\">%u</div><div class=\"label\">已存档</div></div>"
@@ -221,7 +308,6 @@ static std::string build_home(QueryEngine& qe) {
     html += buf;
     html += "</div>";
 
-    // Help
     html += "<section class=\"help-section\"><h3>使用说明</h3><div class=\"result-item\">"
             "<p>输入 URL 地址或域名查看历史网页。例如：<code>sina.com.cn</code> 或 <code>http://www.pku.edu.cn</code></p>"
             "<p class=\"meta\">支持按域名浏览、URL 前缀搜索，以及查看同一 URL 的多个历史版本。</p>"
@@ -232,26 +318,15 @@ static std::string build_home(QueryEngine& qe) {
 }
 
 static std::string build_search(QueryEngine& qe, const std::string& query) {
-    std::string html;
-    snprintf((char*)alloca(1000), sizeof(PAGE_HEADER),
-        "搜索: %s", html_escape(query).c_str());
-    // Use simple string concat
     char hdr[32768];
     snprintf(hdr, sizeof(hdr), PAGE_HEADER, "搜索结果");
-    html = hdr;
+    std::string html = hdr;
 
     html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
     html += "<section class=\"search-panel\"><div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
             "<input type=\"text\" name=\"q\" value=\"" + html_escape(query) + "\">"
             "<button>搜索</button></form></div>"
             "<p class=\"hint\">缩短关键词可以扩大匹配范围；输入完整 URL 会直接进入回放。</p></section>";
-
-    // Check if it's a specific URL
-    if (query.find("http://") == 0 || query.find("https://") == 0) {
-        // Redirect to replay
-        html = ""; // Will be handled in main handler
-        return html;
-    }
 
     // Try exact host match first
     auto urls = qe.get_host_urls(query, 100);
@@ -263,11 +338,9 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
         for (auto& u : urls) {
             html += "<div class=\"result-item\"><a href=\"/replay?url=" + url_encode(u.url) + "\">"
                     + html_escape(u.url) + "</a>";
-            html += " <span class=\"meta\">(" + fmt_date(u.date) + ")</span>";
-            html += "</div>";
+            html += " <span class=\"meta\">(" + fmt_date(u.date) + ")</span></div>";
         }
     } else {
-        // Try host substring match (searches all host blocks)
         auto hosts = qe.search_host_substring(query, 100);
         if (!hosts.empty()) {
             char buf[256];
@@ -278,11 +351,11 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
                 html += "<div class=\"result-item\">"
                         "<a href=\"/search?q=" + url_encode(h.first) + "\">"
                         + html_escape(h.first) + "</a>"
-                        "<span class=\"badge\">" + std::to_string(h.second) + " 页</span>"
-                        "</div>";
+                        "<span class=\"badge\">" + std::to_string(h.second) + " 页</span></div>";
             }
         } else {
-            html += "<div class=\"notice\"><strong>未找到匹配结果。</strong><br>请尝试更短的域名片段，或输入完整 URL 后直接回放。</div>";
+            html += "<div class=\"notice\"><strong>未找到匹配结果。</strong><br>"
+                    "请尝试更短的域名片段，或输入完整 URL 后直接回放。</div>";
         }
     }
 
@@ -293,13 +366,14 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
 static std::string build_replay(QueryEngine& qe, const std::string& url) {
     auto art = qe.get_page(url);
     if (art.url.empty()) {
-        // Build a proper "not found" page instead of empty redirect
         char hdr[32768];
         snprintf(hdr, sizeof(hdr), PAGE_HEADER, "未找到");
         std::string html = hdr;
         html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
-        html += "<div class=\"notice\"><strong>未找到存档。</strong><br>URL: " + html_escape(url) + "</div>";
-        html += "<section class=\"search-panel\"><div class=\"search-bar\"><form action=\"/search\" method=\"get\">"
+        html += "<div class=\"notice\"><strong>未找到存档。</strong><br>URL: "
+                + html_escape(url) + "</div>";
+        html += "<section class=\"search-panel\"><div class=\"search-bar\">"
+                "<form action=\"/search\" method=\"get\">"
                 "<input type=\"text\" name=\"q\" value=\"" + html_escape(url) + "\">"
                 "<button>搜索</button></form></div>"
                 "<p class=\"hint\">可以删除路径末尾部分，只保留域名或较短 URL 前缀再试。</p></section>";
@@ -314,14 +388,17 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
     html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a>"
             "<a href=\"/calendar?url=" + url_encode(url) + "\">查看所有版本</a></div>";
 
-    html += "<div class=\"page-view\"><h2>" + html_escape(art.title.empty() ? "(无标题)" : art.title) + "</h2>";
+    html += "<div class=\"page-view\"><h2>"
+            + html_escape(art.title.empty() ? "(无标题)" : art.title) + "</h2>";
     html += "<div class=\"page-meta\">"
-            "<div class=\"meta-item\"><span class=\"meta-label\">URL</span><span class=\"meta-value\">" + html_escape(url) + "</span></div>"
-            "<div class=\"meta-item\"><span class=\"meta-label\">存档时间</span><span class=\"meta-value\">" + fmt_date(art.date) + "</span></div>"
-            "<div class=\"meta-item\"><span class=\"meta-label\">站点</span><span class=\"meta-value\">" + html_escape(extract_host(url)) + "</span></div>"
+            "<div class=\"meta-item\"><span class=\"meta-label\">URL</span>"
+            "<span class=\"meta-value\">" + html_escape(url) + "</span></div>"
+            "<div class=\"meta-item\"><span class=\"meta-label\">存档时间</span>"
+            "<span class=\"meta-value\">" + fmt_date(art.date) + "</span></div>"
+            "<div class=\"meta-item\"><span class=\"meta-label\">站点</span>"
+            "<span class=\"meta-value\">" + html_escape(extract_host(url)) + "</span></div>"
             "</div>";
 
-    // Version count
     auto vers = qe.get_versions(url);
     if (vers.size() > 1) {
         snprintf(buf, sizeof(buf),
@@ -331,7 +408,8 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
         html += buf;
     }
 
-    html += "<div class=\"page-body\">" + html_escape(art.body.empty() ? "(无内容)" : art.body) + "</div>";
+    html += "<div class=\"page-body\">"
+            + html_escape(art.body.empty() ? "(无内容)" : art.body) + "</div>";
     html += "</div>" + std::string(PAGE_FOOTER);
     return html;
 }
@@ -347,19 +425,19 @@ static std::string build_calendar(QueryEngine& qe, const std::string& url) {
             "<a href=\"/replay?url=" + url_encode(url) + "\">查看最新版本</a></div>";
 
     html += "<h2>版本历史</h2>";
-    html += "<div class=\"result-item\"><strong>URL:</strong> " + html_escape(url) + "<br>"
-            "<strong>站点:</strong> " + html_escape(extract_host(url)) + "<br>"
-            "<strong>版本数:</strong> " + std::to_string(vers.size()) + "</div>";
+    html += "<div class=\"result-item\"><strong>URL:</strong> "
+            + html_escape(url) + "<br><strong>站点:</strong> "
+            + html_escape(extract_host(url)) + "<br><strong>版本数:</strong> "
+            + std::to_string(vers.size()) + "</div>";
 
     if (!vers.empty()) {
         html += "<h3>所有版本</h3>";
         for (auto& v : vers) {
             html += "<div class=\"result-item\">"
-                    "<a href=\"/replay?url=" + url_encode(url) + "&date=" + std::to_string(v.date) + "\">"
-                    + fmt_date(v.date) + "</a>";
-            if (v.record_count > 1) {
+                    "<a href=\"/replay?url=" + url_encode(url) + "&date="
+                    + std::to_string(v.date) + "\">" + fmt_date(v.date) + "</a>";
+            if (v.record_count > 1)
                 html += " <span class=\"badge\">" + std::to_string(v.record_count) + " 条</span>";
-            }
             html += "</div>";
         }
     }
@@ -370,21 +448,253 @@ static std::string build_calendar(QueryEngine& qe, const std::string& url) {
 
 // ── HTTP Response ─────────────────────────────────────────────
 
-static void send_response(int fd, int code, const std::string& content_type, const std::string& body) {
-    char hdr[512];
-    snprintf(hdr, sizeof(hdr),
-        "HTTP/1.0 %d OK\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %zu\r\n"
+static void send_response(int fd, int code, const std::string& content_type,
+                           const std::string& body, bool gzip_ok = false,
+                           const std::string& etag = "",
+                           time_t last_modified = 0) {
+    std::string response_body = body;
+    bool is_gzipped = false;
+
+    if (gzip_ok) {
+        std::string compressed;
+        if (gzip_compress(body, compressed)) {
+            response_body = compressed;
+            is_gzipped = true;
+        }
+    }
+
+    char hdr[1024];
+    int hdr_len;
+
+    if (etag.empty() && last_modified == 0) {
+        // Simple response
+        hdr_len = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.0 %d OK\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n"
+            "Server: WebInfoMall/2.0\r\n"
+            "%s"
+            "\r\n",
+            code, content_type.c_str(), response_body.size(),
+            is_gzipped ? "Content-Encoding: gzip\r\n" : "");
+    } else {
+        // Response with caching headers
+        hdr_len = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.0 %d OK\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n"
+            "Server: WebInfoMall/2.0\r\n"
+            "%s"
+            "%s"
+            "%s"
+            "Cache-Control: public, max-age=86400\r\n"
+            "\r\n",
+            code, content_type.c_str(), response_body.size(),
+            is_gzipped ? "Content-Encoding: gzip\r\n" : "",
+            etag.empty() ? "" : ("ETag: " + etag + "\r\n").c_str(),
+            last_modified ? ("Last-Modified: " + http_date(last_modified) + "\r\n").c_str() : "");
+    }
+
+    write(fd, hdr, hdr_len);
+    write(fd, response_body.data(), response_body.size());
+}
+
+static void send_304(int fd, const std::string& etag) {
+    char hdr[256];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.0 304 Not Modified\r\n"
+        "ETag: %s\r\n"
+        "Cache-Control: public, max-age=86400\r\n"
         "Connection: close\r\n"
         "Server: WebInfoMall/2.0\r\n"
         "\r\n",
-        code, content_type.c_str(), body.size());
-    write(fd, hdr, strlen(hdr));
-    write(fd, body.data(), body.size());
+        etag.c_str());
+    write(fd, hdr, hdr_len);
 }
 
-// ── Main Server Loop ──────────────────────────────────────────
+static void send_redirect(int fd, const std::string& location) {
+    char hdr[512];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.0 302 Found\r\n"
+        "Location: %s\r\n"
+        "Connection: close\r\n"
+        "Server: WebInfoMall/2.0\r\n"
+        "\r\n",
+        location.c_str());
+    write(fd, hdr, hdr_len);
+}
+
+// ── Request Handler ───────────────────────────────────────────
+
+static void handle_request(QueryEngine& qe, int csock) {
+    char buf[8192];
+    ssize_t n = read(csock, buf, sizeof(buf) - 1);
+    if (n <= 0) { close(csock); return; }
+    buf[n] = '\0';
+
+    auto req = parse_request(buf, n);
+    struct timeval tv0, tv1;
+    gettimeofday(&tv0, nullptr);
+
+    std::string response;
+    std::string content_type = "text/html; charset=utf-8";
+    int code = 200;
+
+    if (req.path == "/") {
+        // ETag based on total article count (changes only on re-index)
+        uint32_t total, urls, dmin, dmax;
+        qe.get_stats(total, urls, dmin, dmax);
+        std::string etag = "\"home-" + std::to_string(total) + "\"";
+        if (!req.etag_if_none_match.empty() && req.etag_if_none_match == etag) {
+            send_304(csock, etag);
+            close(csock);
+            return;
+        }
+        response = build_home(qe);
+        send_response(csock, code, content_type, response, req.accepts_gzip);
+    }
+    else if (req.path == "/search") {
+        std::string q = get_param(req.query, "q");
+        if (q.empty()) {
+            response = build_home(qe);
+        } else if (q.find("http://") == 0 || q.find("https://") == 0) {
+            send_redirect(csock, "/replay?url=" + url_encode(q));
+            close(csock);
+            return;
+        } else {
+            response = build_search(qe, q);
+        }
+        send_response(csock, code, content_type, response, req.accepts_gzip);
+    }
+    else if (req.path == "/replay") {
+        std::string url = get_param(req.query, "url");
+        if (url.empty()) {
+            response = build_home(qe);
+            send_response(csock, code, content_type, response, req.accepts_gzip);
+        } else {
+            auto art = qe.get_page(url);
+            if (art.url.empty()) {
+                response = build_replay(qe, url); // generates 404 page
+                code = 404;
+                send_response(csock, code, content_type, response, req.accepts_gzip);
+            } else {
+                std::string etag = make_etag(art.url, art.date);
+                if (!req.etag_if_none_match.empty() && req.etag_if_none_match == etag) {
+                    send_304(csock, etag);
+                    close(csock);
+                    return;
+                }
+                response = build_replay(qe, url);
+                // Set Last-Modified to the crawl date
+                time_t lm = 0;
+                if (art.date >= 19910101) {
+                    struct tm tm_val = {};
+                    tm_val.tm_year = (art.date / 10000) - 1900;
+                    tm_val.tm_mon = ((art.date / 100) % 100) - 1;
+                    tm_val.tm_mday = art.date % 100;
+                    lm = timegm(&tm_val);
+                }
+                send_response(csock, code, content_type, response,
+                              req.accepts_gzip, etag, lm);
+            }
+        }
+    }
+    else if (req.path == "/calendar") {
+        std::string url = get_param(req.query, "url");
+        response = url.empty() ? build_home(qe) : build_calendar(qe, url);
+        send_response(csock, code, content_type, response, req.accepts_gzip);
+    }
+    else if (req.path == "/ping") {
+        send_response(csock, 200, "text/plain", "pong");
+    }
+    else if (req.path == "/stats") {
+        uint32_t total, urls, dmin, dmax;
+        qe.get_stats(total, urls, dmin, dmax);
+        char json[512];
+        snprintf(json, sizeof(json),
+            "{\"total\":%u,\"hosts\":%u,\"date_min\":%u,\"date_max\":%u,"
+            "\"server\":\"WebInfoMall/2.0\",\"threads\":%d}",
+            total, urls, dmin, dmax, THREAD_POOL_SIZE);
+        send_response(csock, 200, "application/json; charset=utf-8", json);
+    }
+    else {
+        // Proper 404 page with navigation
+        char hdr[16384];
+        snprintf(hdr, sizeof(hdr), PAGE_HEADER, "404 Not Found");
+        std::string html = hdr;
+        html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
+        html += "<div class=\"notice\"><h2>404 — 页面不存在</h2>"
+                "<p>您请求的页面 <code>" + html_escape(req.path) + "</code> 未找到。</p></div>";
+        html += "<section class=\"search-panel\"><div class=\"search-bar\">"
+                "<form action=\"/search\" method=\"get\">"
+                "<input type=\"text\" name=\"q\" placeholder=\"搜索历史网页...\">"
+                "<button>搜索</button></form></div></section>";
+        html += PAGE_FOOTER;
+        send_response(csock, 404, content_type, html, req.accepts_gzip);
+    }
+
+    gettimeofday(&tv1, nullptr);
+    double ms = (tv1.tv_sec - tv0.tv_sec) * 1000.0 + (tv1.tv_usec - tv0.tv_usec) / 1000.0;
+    printf("[%s] %s?%s -> %d %.1fms\n",
+           req.method.c_str(), req.path.c_str(), req.query.c_str(), code, ms);
+    close(csock);
+}
+
+// ── Thread Pool ───────────────────────────────────────────────
+
+class ThreadPool {
+    std::vector<std::thread> workers_;
+    std::queue<int> queue_;               // client sockets
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+    QueryEngine& qe_;
+
+public:
+    ThreadPool(QueryEngine& qe, int n_workers = THREAD_POOL_SIZE) : qe_(qe) {
+        for (int i = 0; i < n_workers; i++) {
+            workers_.emplace_back([this] { worker_loop(); });
+        }
+    }
+
+    void enqueue(int csock) {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            queue_.push(csock);
+        }
+        cv_.notify_one();
+    }
+
+    void shutdown() {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (auto& t : workers_) {
+            if (t.joinable()) t.join();
+        }
+    }
+
+private:
+    void worker_loop() {
+        while (true) {
+            int csock = -1;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cv_.wait(lk, [this] { return stop_ || !queue_.empty(); });
+                if (stop_ && queue_.empty()) return;
+                csock = queue_.front();
+                queue_.pop();
+            }
+            handle_request(qe_, csock);
+        }
+    }
+};
+
+// ── Main Server ───────────────────────────────────────────────
 
 static int run_server(QueryEngine& qe, int port) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -401,83 +711,27 @@ static int run_server(QueryEngine& qe, int port) {
     if (bind(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind"); close(sock); return 1;
     }
-    if (listen(sock, 10) < 0) {
+    if (listen(sock, LISTEN_BACKLOG) < 0) {
         perror("listen"); close(sock); return 1;
     }
 
-    printf("Server: http://localhost:%d\n", port);
+    ThreadPool pool(qe);
+
+    printf("Server: http://localhost:%d  (workers=%d)\n", port, THREAD_POOL_SIZE);
     printf("Press Ctrl+C to stop.\n");
 
     while (true) {
         sockaddr_in client;
         socklen_t clen = sizeof(client);
         int csock = accept(sock, (sockaddr*)&client, &clen);
-        if (csock < 0) { perror("accept"); continue; }
-
-        char buf[8192];
-        ssize_t n = read(csock, buf, sizeof(buf) - 1);
-        if (n <= 0) { close(csock); continue; }
-        buf[n] = '\0';
-
-        auto req = parse_request(buf, n);
-        struct timeval tv0, tv1;
-        gettimeofday(&tv0, nullptr);
-        // (timing printed at end of request)
-
-        std::string response;
-        std::string content_type = "text/html; charset=utf-8";
-
-        if (req.path == "/") {
-            response = build_home(qe);
-        } else if (req.path == "/search") {
-            std::string q = get_param(req.query, "q");
-            if (q.empty()) {
-                response = build_home(qe);
-            } else if (q.find("http://") == 0 || q.find("https://") == 0) {
-                // Redirect to replay
-                char redir[512];
-                snprintf(redir, sizeof(redir),
-                    "HTTP/1.0 302 Found\r\nLocation: /replay?url=%s\r\n\r\n",
-                    url_encode(q).c_str());
-                write(csock, redir, strlen(redir));
-                close(csock);
-                continue;
-            } else {
-                response = build_search(qe, q);
-            }
-        } else if (req.path == "/replay") {
-            std::string url = get_param(req.query, "url");
-            if (url.empty()) {
-                response = build_home(qe);
-            } else {
-                response = build_replay(qe, url);
-            }
-        } else if (req.path == "/calendar") {
-            std::string url = get_param(req.query, "url");
-            response = url.empty() ? build_home(qe) : build_calendar(qe, url);
-        } else if (req.path == "/ping") {
-            response = "pong";
-            content_type = "text/plain";
-        } else if (req.path == "/stats") {
-            uint32_t total, urls, dmin, dmax;
-            qe.get_stats(total, urls, dmin, dmax);
-            char json[256];
-            snprintf(json, sizeof(json),
-                "{\"total\":%u,\"hosts\":%u,\"date_min\":%u,\"date_max\":%u}",
-                total, urls, dmin, dmax);
-            response = json;
-            content_type = "application/json";
-        } else {
-            response = "<html><body><h1>404</h1></body></html>";
+        if (csock < 0) {
+            perror("accept");
+            continue;
         }
-
-        send_response(csock, 200, content_type, response);
-        gettimeofday(&tv1, nullptr);
-        double ms = (tv1.tv_sec - tv0.tv_sec) * 1000.0 + (tv1.tv_usec - tv0.tv_usec) / 1000.0;
-        printf("[%s] %s?%s -> %d %.1fms\n", req.method.c_str(), req.path.c_str(), req.query.c_str(), 200, ms);
-        close(csock);
+        pool.enqueue(csock);
     }
 
+    pool.shutdown();
     close(sock);
     return 0;
 }

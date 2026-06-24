@@ -8,28 +8,18 @@ Web InfoMall is a Wayback Machine-like historical web page replay system for Chi
 
 ## Build & Run
 
-### C++ system (Phase 2 — production)
+### C++ system (Phase 2 v2 — production)
 
 ```bash
-cd src && make            # Build load + serve binaries
+cd src && make            # Build load + serve binaries (v2: threaded, gzip)
 cd src && make test       # Build and run parser smoke test (10 articles)
 ```
 
-Requires: C++17 (clang++ or g++), zlib, iconv.
+Requires: C++17 (clang++ or g++), zlib, iconv, pthread.
 
-### Python prototype (Phase 1 — validation, no deps)
-
+**macOS note**: If `clang++` can't find C++ stdlib headers (`cstdint` not found), the Makefile auto-detects the SDK path. If that fails, set it manually:
 ```bash
-# Load sample data into SQLite
-python3 load_data.py                          # Load dat0 only (~118K articles)
-python3 load_data.py --files dat0,dat1,dat2   # Load specific files
-
-# Start HTTP replay server
-python3 server.py                             # http://localhost:5000
-python3 server.py --port 8080 --db my.db
-
-# Smoke test suite
-python3 test_server.py
+make CXX_STDLIB=/path/to/sdk/usr/include/c++/v1
 ```
 
 ### Data loading pipeline (C++)
@@ -44,6 +34,15 @@ python3 test_server.py
 ```bash
 ./src/serve <data_dir> <index_dir> [port]
 ./src/serve archive/data archive/index 8088
+```
+The server now uses a **4-worker thread pool** and supports **gzip compression** and **HTTP cache headers** (ETag, Last-Modified, Cache-Control, 304 Not Modified).
+
+### Python prototype (Phase 1 — validation, no deps)
+
+```bash
+python3 load_data.py                          # Load dat0 only (~118K articles)
+python3 server.py                             # http://localhost:5000
+python3 test_server.py
 ```
 
 ## Architecture
@@ -71,10 +70,27 @@ TenMillionArticles (.dat) → parser.cpp (GBK→UTF-8) → store.cpp (zlib compr
 
 ### Core data structures (`src/common.h`)
 
-- **`ArticleRecord`** — fixed 40-byte header + variable URL/title/body; body optionally zlib-compressed. Sortable by `(url_hash, crawl_date DESC)`.
-- **`UrlIndexEntry`** — 28-byte index entry: `(url_hash, crawl_date, file_offset, record_size, shard_id)`. Sorted for O(log N) binary search.
-- **`HostBlock`** — 40-byte embedded index block per hostname (32-byte padded name + first_entry + entry_count). Host-level O(log H) binary search drills down to per-URL entries.
-- **`ShardFileHeader`** — file header with host_count, entry_count, followed by sorted HostBlock array, then sorted UrlIndexEntry array.
+- **`ArticleRecord`** — fixed 40-byte header + variable URL/title/body; body optionally zlib-compressed.
+- **`UrlIndexEntry`** — 28-byte index entry: `(url_hash, crawl_date, file_offset, record_size, url_len, url_offset, reserved)`. In v2 shards, the URL is at `url_pool + url_offset` — no data-file IO needed for search or host listing.
+- **`HostBlock`** — 40-byte embedded index block per hostname (32-byte padded name + first_entry + entry_count). O(log H) binary search.
+- **`ShardFileHeader`** — v2 header with magic `0x49445821` (`"IDX!"`), entry_count, host_count, url_pool_size. Followed by HostBlock array, UrlIndexEntry array, and the URL string pool (concatenated null-terminated URLs).
+
+v1 shards (magic `0x49445820`, `"IDX "`) are still readable by the query engine via a fallback path that reads URLs from data files.
+
+### Shard file layout (v2)
+
+```
+ShardFileHeader (16 bytes)
+HostBlock[host_count]          (40 bytes each, sorted by hostname)
+UrlIndexEntry[entry_count]     (28 bytes each, sorted by host+url_hash+date DESC)
+char url_pool[url_pool_size]   (concatenated URLs, each entry points via url_offset+url_len)
+```
+
+### Server (v2)
+
+- **4-worker thread pool** (`std::thread` + condition variable), replacing the old single-threaded accept loop.
+- **gzip compression**: Responses > 1KB are compressed if `Accept-Encoding: gzip` is present and savings ≥ 5%.
+- **Cache headers**: `ETag` (url_hash + date), `Last-Modified` (crawl date), `Cache-Control: public, max-age=86400`. Supports `If-None-Match` → `304 Not Modified`.
 
 ### Sharding strategy
 
@@ -118,6 +134,7 @@ Jinja2-style templates (`templates/*.html`) for a potential Flask/Jinja2-based s
 ## Key constraints
 
 - Default port: Python 5000, C++ 8088.
-- C++ server is single-threaded, blocking — each request handled sequentially.
+- C++ server uses 4-worker thread pool; QueryEngine mmap is thread-safe (read-only).
 - SQLite uses WAL mode with 64MB cache for Phase 1 performance.
 - Shards target ~500K entries each for 14M total (fits in memory during index build).
+- v2 index embeds URLs inline (~80 bytes/entry avg); total index size ~400 MB for 14M articles (vs ~400 MB data files + index).
