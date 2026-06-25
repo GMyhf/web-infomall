@@ -482,11 +482,15 @@ static std::string build_home(QueryEngine& qe) {
             "<button type=\"submit\">搜索</button></form></div>"
             "<p class=\"hint\">可输入完整 URL、域名，或域名片段。| "
             "<a href=\"/random\">🎲 手气不错</a> | "
-            "<a href=\"/browse\">📅 按日期浏览</a></p>"
+            "<a href=\"/browse\">📅 按日期浏览</a> | "
+            "<a href=\"/topic?q=\">🔥 热点事件回溯</a></p>"
             "<div class=\"quick-links\">"
             "<a href=\"/search?q=sina\">sina</a>"
             "<a href=\"/search?q=dailynews.sina.com.cn\">dailynews.sina.com.cn</a>"
             "<a href=\"/search?q=news.sina.com.cn\">news.sina.com.cn</a>"
+            "<a href=\"/topic?q=北京\">🔥 北京</a>"
+            "<a href=\"/topic?q=奥运\">🔥 奥运</a>"
+            "<a href=\"/topic?q=非典\">🔥 非典</a>"
             "</div></section>";
 
     // Stats row + year chart

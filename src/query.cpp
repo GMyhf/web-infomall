@@ -653,23 +653,42 @@ std::vector<TitlePosting> QueryEngine::search_by_title(const std::string& query,
     auto terms = tokenize_title(query);
     if (terms.empty()) return results;
 
-    // OR logic across all query terms, dedup by URL, keep latest date
-    std::map<std::string, std::pair<uint32_t, std::string>> seen;
-
+    // Multi-term: AND logic — URL must match ALL terms
+    // Start with the smallest posting set (most selective)
+    std::vector<const std::vector<TitlePosting>*> postings_lists;
     for (auto& term : terms) {
         auto* posts = find_term(term);
-        if (!posts) continue;
-        for (auto& p : *posts) {
-            auto it = seen.find(p.url);
-            if (it == seen.end() || p.date > it->second.first) {
-                seen[p.url] = {p.date, p.title};
+        if (!posts) return results; // any term missing -> no results
+        postings_lists.push_back(posts);
+    }
+
+    // Sort by list size ascending for efficiency
+    std::sort(postings_lists.begin(), postings_lists.end(),
+        [](const auto* a, const auto* b) { return a->size() < b->size(); });
+
+    // Build URL map from the smallest list, verify in all others
+    auto& smallest = *postings_lists[0];
+    std::map<std::string, std::pair<uint32_t, std::string>> candidates;
+
+    for (auto& p : smallest) {
+        bool found_in_all = true;
+        for (size_t i = 1; i < postings_lists.size() && found_in_all; i++) {
+            bool found = false;
+            for (auto& q : *postings_lists[i]) {
+                if (q.url == p.url) { found = true; break; }
             }
+            if (!found) found_in_all = false;
+        }
+        if (found_in_all) {
+            auto it = candidates.find(p.url);
+            if (it == candidates.end() || p.date > it->second.first)
+                candidates[p.url] = {p.date, p.title};
         }
     }
 
-    for (auto& [url, info] : seen) {
+    for (auto& [url, info] : candidates)
         results.push_back({url, info.first, info.second});
-    }
+
     std::sort(results.begin(), results.end(),
         [](const TitlePosting& a, const TitlePosting& b) {
             return a.date > b.date;
