@@ -82,16 +82,20 @@ struct Logger {
 // ── Simple Rate Limiter (per-IP, best-effort) ────────────────
 
 struct RateLimiter {
+    // Ring-buffer capacity must be >= max_reqs_, otherwise old timestamps get
+    // overwritten before they expire and the sliding-window count goes wrong.
+    static constexpr uint32_t WINDOW_SLOTS = 32;
     struct Bucket {
         uint32_t ip;
-        time_t timestamps[20];
+        time_t timestamps[WINDOW_SLOTS];
         uint32_t head;
         uint32_t count;
     };
     std::vector<Bucket> buckets_;
     std::mutex mtx_;
     time_t window_ = 5;      // 5 second window
-    uint32_t max_reqs_ = 30; // max requests per window
+    uint32_t max_reqs_ = 30; // max requests per window (must be <= WINDOW_SLOTS)
+    static_assert(WINDOW_SLOTS >= 30, "WINDOW_SLOTS must hold a full window of requests");
 
     RateLimiter() { buckets_.reserve(1024); }
 
@@ -101,11 +105,12 @@ struct RateLimiter {
         std::lock_guard<std::mutex> lk(mtx_);
         for (auto& b : buckets_) {
             if (b.ip != ip) continue;
-            while (b.count > 0 && now - b.timestamps[(b.head - b.count + 20) % 20] > window_)
+            while (b.count > 0 &&
+                   now - b.timestamps[(b.head - b.count + WINDOW_SLOTS) % WINDOW_SLOTS] > window_)
                 b.count--;
             if (b.count >= max_reqs_) return true;
             b.timestamps[b.head] = now;
-            b.head = (b.head + 1) % 20;
+            b.head = (b.head + 1) % WINDOW_SLOTS;
             b.count++;
             return false;
         }
@@ -643,6 +648,16 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
         html += PAGE_FOOTER;
         return html;
     }
+    if (!art.valid) {
+        char hdr[32768];
+        snprintf(hdr, sizeof(hdr), PAGE_HEADER, "数据损坏");
+        std::string html = hdr;
+        html += "<div class=\"nav-links\"><a href=\"/\">返回首页</a></div>";
+        html += "<div class=\"notice\"><strong>存档记录校验失败（CRC 不匹配或解压失败），无法可靠展示。</strong><br>URL: "
+                + html_escape(url) + "</div>";
+        html += PAGE_FOOTER;
+        return html;
+    }
 
     char buf[16000];
     snprintf(buf, sizeof(buf), PAGE_HEADER, html_escape(art.title).c_str());
@@ -701,7 +716,9 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
     // ── Auto-link bare URLs in body text ─────────────────────
     std::string body_html;
     {
-        std::string raw_body = art.body.empty() ? "(无内容)" : art.body;
+        // Bind by reference — art.body can be multi-MB; copying it here was pure waste.
+        static const std::string kEmptyBody = "(无内容)";
+        const std::string& raw_body = art.body.empty() ? kEmptyBody : art.body;
         body_html.reserve(raw_body.size() * 12 / 10);
         size_t pos = 0;
         // Simple URL auto-linking: http:// and https:// patterns
@@ -744,6 +761,9 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
             "<a href=\"/proxy?url=" + url_encode(url) + "\" style=\"padding:4px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;font-size:.82rem;color:var(--muted);text-decoration:none\">📄 原始内容</a>"
             "</span></div>";
 
+    // Pre-grow once for the (potentially large) body plus trailing markup,
+    // avoiding repeated reallocations of `html` as it's appended below.
+    html.reserve(html.size() + body_html.size() + 8192);
     html += "<div class=\"page-body\">" + body_html + "</div>";
 
     // Metadata panel: technical details about the archived record
@@ -1222,7 +1242,7 @@ static std::string build_diff(QueryEngine& qe, const std::string& url,
     html += "<h2>版本对比</h2>";
     html += "<div class=\"result-item\"><strong>URL:</strong> " + html_escape(url) + "<br>";
 
-    if (art_a.url.empty() || art_b.url.empty()) {
+    if (art_a.url.empty() || art_b.url.empty() || !art_a.valid || !art_b.valid) {
         html += "<div class=\"notice\">无法加载对比所需的两个版本。</div>";
         html += PAGE_FOOTER;
         return html;
@@ -1589,7 +1609,7 @@ static std::string build_topic(QueryEngine& qe, const std::string& query) {
 static void handle_proxy(QueryEngine& qe, int csock, const std::string& url,
                           bool gzip_ok, bool keep_alive) {
     auto art = qe.get_page(url);
-    if (art.url.empty() || art.body.empty()) {
+    if (art.url.empty() || art.body.empty() || !art.valid) {
         std::string msg = "404 Not Found: " + url;
         send_status_response(csock, 404, "Not Found",
                              "text/plain; charset=utf-8", msg);
@@ -1676,7 +1696,11 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
             send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
         } else {
             auto art = qe.get_page(url);
-            if (art.url.empty()) {
+            if (art.url.empty() || !art.valid) {
+                // Not found, or record exists but failed CRC/decompression.
+                // Either way the page cannot be served — treat as 404 ("record
+                // exists but is broken"). build_replay renders the right notice;
+                // never cache corrupt content.
                 response = build_replay(qe, url);
                 code = 404;
                 send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);

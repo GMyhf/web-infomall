@@ -23,6 +23,13 @@ void IndexBuilderV2::add_entry(const std::string& url, uint32_t crawl_date,
     EntryWithHost e;
     e.entry.url_hash = ::url_hash(url);
     e.entry.crawl_date = crawl_date;
+    // file_offset is uint32_t; data files are capped at MAX_DAT_FILE (2GB), so
+    // this fits. Guard explicitly so raising that cap can't silently corrupt the index.
+    if (offset < 0 || offset > static_cast<int64_t>(UINT32_MAX)) {
+        fprintf(stderr, "WARN: file_offset %lld out of uint32_t range for %s — skipping entry\n",
+                (long long)offset, url.c_str());
+        return;
+    }
     e.entry.file_offset = static_cast<uint32_t>(offset);
     e.entry.record_size = static_cast<uint16_t>(record_size);
     e.entry.url_len = 0;       // filled in build_shard
@@ -31,6 +38,58 @@ void IndexBuilderV2::add_entry(const std::string& url, uint32_t crawl_date,
     e.host = host;
     e.url = url;
     shards_[sid].push_back(std::move(e));
+}
+
+void IndexBuilderV2::load_existing() {
+    size_t loaded = 0;
+    for (int sid = 0; sid < NUM_SHARDS; sid++) {
+        char fname[64];
+        snprintf(fname, sizeof(fname), "%s/url_%02d.idx", index_dir_.c_str(), sid);
+        FILE* f = fopen(fname, "rb");
+        if (!f) continue;
+
+        ShardFileHeader hdr;
+        if (fread(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); continue; }
+        // Only v2 shards embed the URL pool; v1 cannot be reconstructed without
+        // touching the data files, so we refuse to merge it (would lose URLs).
+        if (hdr.magic != SHARD_MAGIC) {
+            fprintf(stderr, "WARN: shard %d magic 0x%08x is not v2; cannot merge — "
+                            "existing entries in this shard will be lost\n", sid, hdr.magic);
+            fclose(f);
+            continue;
+        }
+
+        // Skip the HostBlock array (rebuilt from scratch in build_shard).
+        if (fseek(f, static_cast<long>(hdr.host_count) * sizeof(HostBlock), SEEK_CUR) != 0) {
+            fclose(f); continue;
+        }
+        std::vector<UrlIndexEntry> ents(hdr.entry_count);
+        if (hdr.entry_count &&
+            fread(ents.data(), sizeof(UrlIndexEntry), hdr.entry_count, f) != hdr.entry_count) {
+            fclose(f); continue;
+        }
+        std::vector<char> pool(hdr.url_pool_size);
+        if (hdr.url_pool_size &&
+            fread(pool.data(), 1, hdr.url_pool_size, f) != hdr.url_pool_size) {
+            fclose(f); continue;
+        }
+        fclose(f);
+
+        auto& vec = shards_[sid];
+        vec.reserve(vec.size() + hdr.entry_count);
+        for (auto& e : ents) {
+            if (!entry_in_pool(e, hdr.url_pool_size)) continue;  // skip corrupt slice
+            EntryWithHost ewh;
+            ewh.entry = e;
+            ewh.entry.url_offset = 0;   // recomputed in build_shard
+            ewh.entry.url_len = 0;
+            ewh.url.assign(pool.data() + e.url_offset, e.url_len);
+            ewh.host = extract_host(ewh.url);
+            vec.push_back(std::move(ewh));
+            loaded++;
+        }
+    }
+    printf("Merged %zu existing index entries\n", loaded);
 }
 
 bool IndexBuilderV2::build() {
@@ -57,6 +116,17 @@ bool IndexBuilderV2::build_shard(int sid) {
     auto& items = shards_[sid];
     std::sort(items.begin(), items.end());
 
+    // Drop exact duplicates that an incremental re-load can introduce (same URL,
+    // same crawl date, same data-file offset). Distinct versions — differing date
+    // or offset — are kept. Sort above makes identical records adjacent.
+    items.erase(std::unique(items.begin(), items.end(),
+        [](const EntryWithHost& a, const EntryWithHost& b) {
+            return a.entry.url_hash == b.entry.url_hash &&
+                   a.entry.crawl_date == b.entry.crawl_date &&
+                   a.entry.file_offset == b.entry.file_offset &&
+                   a.url == b.url;
+        }), items.end());
+
     // Build URL string pool: concatenate all URLs
     std::string url_pool;
     url_pool.reserve(items.size() * 80); // avg URL ~80 bytes
@@ -65,9 +135,18 @@ bool IndexBuilderV2::build_shard(int sid) {
     std::vector<UrlIndexEntry> entries;
     entries.reserve(items.size());
     for (auto& it : items) {
+        // url_len is uint16_t and lookups assume url_pool[offset .. offset+url_len)
+        // is exactly the stored URL, so clamp BOTH the length field and the bytes
+        // appended to the pool to the same value. MAX_URL_LEN (2048) << 65535.
+        size_t ulen = it.url.size();
+        if (ulen > MAX_URL_LEN) {
+            fprintf(stderr, "WARN: URL length %zu exceeds MAX_URL_LEN (%u), truncating: %s\n",
+                    ulen, MAX_URL_LEN, it.url.c_str());
+            ulen = MAX_URL_LEN;
+        }
         it.entry.url_offset = static_cast<uint32_t>(url_pool.size());
-        it.entry.url_len = static_cast<uint16_t>(it.url.size());
-        url_pool.append(it.url);
+        it.entry.url_len = static_cast<uint16_t>(ulen);
+        url_pool.append(it.url.data(), ulen);
         entries.push_back(it.entry);
     }
 

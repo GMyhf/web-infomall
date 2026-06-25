@@ -38,6 +38,11 @@ public:
     void add_entry(const std::string& url, uint32_t crawl_date,
                    int64_t offset, uint32_t record_size);
 
+    // Incremental merge: read existing v2 shard files back into the in-memory
+    // accumulator so a subsequent build() rewrites old + new entries together
+    // instead of clobbering prior data. Safe to call before adding new entries.
+    void load_existing();
+
     bool build();
 
     size_t total_entries() const;

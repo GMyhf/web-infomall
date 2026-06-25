@@ -13,7 +13,9 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <map>
+#include <mutex>
 #include <algorithm>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -58,6 +60,7 @@ public:
         std::string title;
         std::string body;
         uint32_t date = 0;
+        bool valid = true;   // false if CRC mismatch or decompression failed
     };
 
     explicit ArticleReader(const std::string& data_dir);
@@ -87,6 +90,9 @@ class QueryEngine {
         std::vector<std::string> urls;
     };
     mutable std::vector<YearCount> year_dist_cached_;
+    // Guards the lazy fill of year_dist_cached_ on the slow (no precompute) path,
+    // since the server calls get_year_distribution() from multiple worker threads.
+    mutable std::mutex year_dist_mtx_;
     std::vector<TodayEntry> today_data_;
 
     static std::string data_path(uint32_t crawl_date);

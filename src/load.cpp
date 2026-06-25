@@ -100,6 +100,83 @@ static void write_title_index(const std::string& index_dir,
     printf("  Wrote title_idx.dat (%u terms)\n", num_terms);
 }
 
+// ── Incremental: read existing precomputed artifacts back into accumulators ──
+// Each reader exactly mirrors the corresponding writer above.
+
+static void read_year_dist(const std::string& index_dir,
+                           std::map<uint32_t, uint32_t>& year_counts) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/year_dist.dat", index_dir.c_str());
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    uint32_t count;
+    if (fread(&count, sizeof(count), 1, f) == 1) {
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t y, c;
+            if (fread(&y, sizeof(y), 1, f) != 1 || fread(&c, sizeof(c), 1, f) != 1) break;
+            year_counts[y] += c;
+        }
+    }
+    fclose(f);
+}
+
+static void read_today(const std::string& index_dir,
+                       std::map<uint32_t, std::vector<std::string>>& today_urls) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/today.dat", index_dir.c_str());
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    uint32_t num_days;
+    if (fread(&num_days, sizeof(num_days), 1, f) == 1) {
+        for (uint32_t i = 0; i < num_days; i++) {
+            uint16_t m; uint32_t cnt;
+            if (fread(&m, sizeof(m), 1, f) != 1 || fread(&cnt, sizeof(cnt), 1, f) != 1) break;
+            auto& list = today_urls[m];
+            for (uint32_t j = 0; j < cnt; j++) {
+                uint16_t len;
+                if (fread(&len, sizeof(len), 1, f) != 1) { fclose(f); return; }
+                std::string url(len, '\0');
+                if (len && fread(&url[0], 1, len, f) != len) { fclose(f); return; }
+                if (list.size() < 200) list.push_back(std::move(url));
+            }
+        }
+    }
+    fclose(f);
+}
+
+static void read_title_index(const std::string& index_dir,
+                             std::map<std::string, std::vector<TitlePosting>>& title_idx) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/title_idx.dat", index_dir.c_str());
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    uint32_t num_terms;
+    if (fread(&num_terms, sizeof(num_terms), 1, f) == 1) {
+        for (uint32_t i = 0; i < num_terms; i++) {
+            uint16_t tlen;
+            if (fread(&tlen, sizeof(tlen), 1, f) != 1) break;
+            std::string term(tlen, '\0');
+            if (tlen && fread(&term[0], 1, tlen, f) != tlen) break;
+            uint32_t count;
+            if (fread(&count, sizeof(count), 1, f) != 1) break;
+            auto& posts = title_idx[term];
+            for (uint32_t j = 0; j < count; j++) {
+                TitlePosting p;
+                uint16_t ulen, tlen2;
+                if (fread(&p.date, sizeof(p.date), 1, f) != 1) { fclose(f); return; }
+                if (fread(&ulen, sizeof(ulen), 1, f) != 1) { fclose(f); return; }
+                p.url.resize(ulen);
+                if (ulen && fread(&p.url[0], 1, ulen, f) != ulen) { fclose(f); return; }
+                if (fread(&tlen2, sizeof(tlen2), 1, f) != 1) { fclose(f); return; }
+                p.title.resize(tlen2);
+                if (tlen2 && fread(&p.title[0], 1, tlen2, f) != tlen2) { fclose(f); return; }
+                posts.push_back(std::move(p));
+            }
+        }
+    }
+    fclose(f);
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <dat_dir> <archive_dir> [--max N] [--files 0,1,2]\n", argv[0]);
@@ -180,6 +257,32 @@ int main(int argc, char** argv) {
     int total = 0;
     int last_fidx = -1;
     uint32_t date_min = UINT32_MAX, date_max = 0;
+    uint32_t existing_articles = 0;
+
+    // Incremental merge: pull existing index + precomputed data into memory so
+    // this run rewrites old + new together instead of overwriting the old.
+    if (incremental) {
+        printf("Incremental: merging with existing archive...\n");
+        indexer.load_existing();
+        read_year_dist(index_dir, year_counts);
+        read_today(index_dir, today_urls);
+        read_title_index(index_dir, title_idx);
+
+        char meta_path[256];
+        snprintf(meta_path, sizeof(meta_path), "%s/meta.dat", index_dir.c_str());
+        FILE* mf = fopen(meta_path, "rb");
+        if (mf) {
+            ArchiveMeta m = {};
+            if (fread(&m, sizeof(m), 1, mf) == 1) {
+                existing_articles = m.total_articles;
+                if (m.date_min && m.date_min < date_min) date_min = m.date_min;
+                if (m.date_max > date_max) date_max = m.date_max;
+            }
+            fclose(mf);
+        }
+        printf("  Carried over %u articles, %zu years, %zu MMDD, %zu title terms\n",
+               existing_articles, year_counts.size(), today_urls.size(), title_idx.size());
+    }
     double t0 = elapsed();
 
     for (int fidx : file_indices) {
@@ -274,7 +377,7 @@ int main(int argc, char** argv) {
     FILE* mf = fopen(meta_path, "wb");
     if (mf) {
         ArchiveMeta meta = {};
-        meta.total_articles = total;
+        meta.total_articles = total + existing_articles;
         meta.total_urls = 0; // computed from host block count
         meta.date_min = date_min;
         meta.date_max = date_max;

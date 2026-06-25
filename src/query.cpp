@@ -76,7 +76,9 @@ ArticleReader::Article ArticleReader::read_article(
         if (expected != rec->crc32) {
             fprintf(stderr, "CRC32 MISMATCH at offset %lld in %s: got 0x%08x, expected 0x%08x\n",
                     (long long)offset, rel_path.c_str(), rec->crc32, expected);
-            // Still return data — CRC32 is advisory for integrity monitoring
+            // Surface corruption to the caller. Data is still populated below
+            // so integrity tooling can inspect it, but the page is not served.
+            art.valid = false;
         }
     }
 
@@ -95,7 +97,12 @@ ArticleReader::Article ArticleReader::read_article(
             decomp.resize(dest_len);
             art.body.assign(decomp.data(), decomp.size());
         } else {
+            fprintf(stderr, "DECOMPRESS FAILED (zlib %d) at offset %lld in %s\n",
+                    ret, (long long)offset, rel_path.c_str());
+            // Body is unrecoverable; expose compressed bytes for diagnostics
+            // but mark invalid so the server does not render garbage.
             art.body.assign(rec->body(), rec->body_compr_len);
+            art.valid = false;
         }
     } else {
         art.body.assign(rec->body(), rec->body_compr_len);
@@ -187,7 +194,7 @@ void QueryEngine::load_today() {
 std::string QueryEngine::get_entry_url(const UrlIndexEntry& ent, int sid) {
     auto& shard = shards_[sid];
     if (shard.is_v2 && shard.url_pool) {
-        return entry_url(ent, shard.url_pool);
+        return entry_url(ent, shard.url_pool, shard.header->url_pool_size);
     }
     // v1 fallback: read from data file
     auto buf = reader_.read_article(data_path(ent.crawl_date),
@@ -307,7 +314,7 @@ std::vector<QueryEngine::UrlWithDate> QueryEngine::get_host_urls(
         auto& ent = block[i];
         std::string url;
         if (shard.is_v2 && shard.url_pool) {
-            url = entry_url(ent, shard.url_pool);
+            url = entry_url(ent, shard.url_pool, shard.header->url_pool_size);
         } else {
             // v1 fallback
             url = reader_.read_article(data_path(ent.crawl_date),
@@ -336,9 +343,9 @@ std::vector<std::string> QueryEngine::search_prefix(const std::string& prefix, i
             for (uint32_t i = 0; i < shard.header->entry_count &&
                  urls.size() < static_cast<size_t>(limit); i++) {
                 auto& ent = shard.entries[i];
-                if (entry_url_has_prefix(ent, shard.url_pool, prefix) ||
-                    entry_host_contains(ent, shard.url_pool, prefix)) {
-                    std::string u = entry_url(ent, shard.url_pool);
+                if (entry_url_has_prefix(ent, shard.url_pool, prefix, shard.header->url_pool_size) ||
+                    entry_host_contains(ent, shard.url_pool, prefix, shard.header->url_pool_size)) {
+                    std::string u = entry_url(ent, shard.url_pool, shard.header->url_pool_size);
                     if (!u.empty() && (urls.empty() || u != urls.back())) {
                         urls.push_back(u);
                     }
@@ -412,10 +419,14 @@ std::vector<std::pair<std::string, uint32_t>> QueryEngine::get_top_hosts(int lim
             hosts.emplace_back(name, shard.hosts[i].entry_count);
         }
     }
-    std::sort(hosts.begin(), hosts.end(),
-        [](const auto& a, const auto& b) { return a.second > b.second; });
-    if (hosts.size() > static_cast<size_t>(limit))
+    auto by_count_desc = [](const auto& a, const auto& b) { return a.second > b.second; };
+    if (hosts.size() > static_cast<size_t>(limit)) {
+        // Only the top `limit` need ordering — O(n log k) instead of O(n log n).
+        std::partial_sort(hosts.begin(), hosts.begin() + limit, hosts.end(), by_count_desc);
         hosts.resize(limit);
+    } else {
+        std::sort(hosts.begin(), hosts.end(), by_count_desc);
+    }
     return hosts;
 }
 
@@ -434,7 +445,7 @@ std::string QueryEngine::get_random_url() {
     auto& ent = shard.entries[idx];
 
     if (shard.is_v2 && shard.url_pool)
-        return entry_url(ent, shard.url_pool);
+        return entry_url(ent, shard.url_pool, shard.header->url_pool_size);
     // v1 fallback
     return reader_.read_article(data_path(ent.crawl_date),
         ent.file_offset, std::min<uint32_t>(ent.record_size,
@@ -444,10 +455,13 @@ std::string QueryEngine::get_random_url() {
 // ── Year distribution (precomputed, fallback to scan) ────────
 
 std::vector<QueryEngine::YearCount> QueryEngine::get_year_distribution() {
-    if (!year_dist_cached_.empty()) return year_dist_cached_;
-    return get_year_distribution_slow();
+    std::lock_guard<std::mutex> lk(year_dist_mtx_);
+    if (year_dist_cached_.empty())
+        get_year_distribution_slow();   // fills year_dist_cached_ under lock
+    return year_dist_cached_;
 }
 
+// Caller must hold year_dist_mtx_. Fills year_dist_cached_ by scanning shards.
 std::vector<QueryEngine::YearCount> QueryEngine::get_year_distribution_slow() {
     std::map<uint32_t, uint32_t> ymap;
     for (int sid = 0; sid < NUM_SHARDS; sid++) {
@@ -502,7 +516,7 @@ std::vector<std::string> QueryEngine::get_today_in_history_slow(uint32_t mmdd, i
             if ((ent.crawl_date % 10000) == mmdd) {
                 std::string url;
                 if (shard.is_v2 && shard.url_pool)
-                    url = entry_url(ent, shard.url_pool);
+                    url = entry_url(ent, shard.url_pool, shard.header->url_pool_size);
                 else {
                     url = reader_.read_article(data_path(ent.crawl_date),
                         ent.file_offset, std::min<uint32_t>(ent.record_size,
@@ -540,7 +554,7 @@ std::vector<QueryEngine::UrlWithDate> QueryEngine::get_by_date(uint32_t date, in
             if (ent.crawl_date == date) {
                 std::string url;
                 if (shard.is_v2 && shard.url_pool)
-                    url = entry_url(ent, shard.url_pool);
+                    url = entry_url(ent, shard.url_pool, shard.header->url_pool_size);
                 else {
                     url = reader_.read_article(data_path(ent.crawl_date),
                         ent.file_offset, std::min<uint32_t>(ent.record_size,
@@ -666,18 +680,25 @@ std::vector<TitlePosting> QueryEngine::search_by_title(const std::string& query,
     std::sort(postings_lists.begin(), postings_lists.end(),
         [](const auto* a, const auto* b) { return a->size() < b->size(); });
 
-    // Build URL map from the smallest list, verify in all others
+    // Build a URL hash set for each of the larger lists once (O(total)), then
+    // probe the smallest list against them in O(1) per term — turns the old
+    // O(n·m·k) nested scan into O(n·m).
+    std::vector<std::unordered_set<std::string>> url_sets;
+    url_sets.reserve(postings_lists.size() - 1);
+    for (size_t i = 1; i < postings_lists.size(); i++) {
+        std::unordered_set<std::string> s;
+        s.reserve(postings_lists[i]->size());
+        for (auto& q : *postings_lists[i]) s.insert(q.url);
+        url_sets.push_back(std::move(s));
+    }
+
     auto& smallest = *postings_lists[0];
     std::map<std::string, std::pair<uint32_t, std::string>> candidates;
 
     for (auto& p : smallest) {
         bool found_in_all = true;
-        for (size_t i = 1; i < postings_lists.size() && found_in_all; i++) {
-            bool found = false;
-            for (auto& q : *postings_lists[i]) {
-                if (q.url == p.url) { found = true; break; }
-            }
-            if (!found) found_in_all = false;
+        for (auto& s : url_sets) {
+            if (s.find(p.url) == s.end()) { found_in_all = false; break; }
         }
         if (found_in_all) {
             auto it = candidates.find(p.url);

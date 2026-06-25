@@ -62,7 +62,7 @@ DataStore::StoredRecord DataStore::write_article(
     rec->body_compr_len = body_compr_len;
     rec->body_orig_len = body_orig_len;
     rec->record_size = record_size;
-    rec->mini_md5 = mini_md5(url);
+    rec->mini_hash = mini_hash(url);
     rec->crc32 = 0;
 
     memcpy(const_cast<char*>(rec->url()), url.data(), url.size());

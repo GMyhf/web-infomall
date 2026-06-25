@@ -40,7 +40,7 @@ struct ArticleRecord {
     uint32_t body_compr_len; // compressed body size (0 = uncompressed)
     uint32_t body_orig_len;  // original body size
     uint32_t record_size;    // total size including this header
-    uint32_t mini_md5;       // FNV-1a folded to 32 bits (quick check, NOT MD5)
+    uint32_t mini_hash;      // FNV-1a folded to 32 bits (quick check, NOT MD5)
     uint32_t crc32;          // CRC-32 of entire record (0 = not computed, backward compat)
 
     // After header:
@@ -110,7 +110,8 @@ struct ArchiveMeta {
 
 // ── Hash Functions ────────────────────────────────────────────
 
-// MD5-based URL hash (first 8 bytes of MD5 digest)
+// URL hash — 64-bit FNV-1a (NOT MD5, despite historical naming elsewhere).
+// Used as the primary sort/lookup key for UrlIndexEntry.
 inline uint64_t url_hash(const std::string& url) {
     // FNV-1a 64-bit hash
     uint64_t fnv = 14695981039346656037ULL;
@@ -123,9 +124,9 @@ inline uint64_t url_hash(const std::string& url) {
     return fnv;
 }
 
-// Mini hash (FNV-1a ≫32 XOR lower 32 bits) — for quick record verification
-// NOTE: This is NOT MD5; it's an FNV-1a hash folded to 32 bits.
-inline uint32_t mini_md5(const std::string& url) {
+// Mini hash (FNV-1a ≫32 XOR lower 32 bits) — for quick record verification.
+// NOTE: This is NOT MD5; it's the 64-bit FNV-1a hash folded to 32 bits.
+inline uint32_t mini_hash(const std::string& url) {
     uint64_t h = url_hash(url);
     return static_cast<uint32_t>(h & 0xFFFFFFFF) ^ static_cast<uint32_t>(h >> 32);
 }
@@ -198,24 +199,34 @@ inline const UrlIndexEntry* find_first(const UrlIndexEntry* entries, uint32_t co
     return (lo < static_cast<int>(count) && entries[lo].url_hash == hash) ? &entries[lo] : nullptr;
 }
 
+// Bounds-check an entry's slice against the URL pool. pool_size == 0 means
+// "size unknown, skip check" (legacy callers); pass the real size to guard
+// against a corrupted index causing an out-of-bounds read.
+inline bool entry_in_pool(const UrlIndexEntry& e, uint32_t pool_size) {
+    if (pool_size == 0) return true;  // unknown size — caller opted out
+    // Use 64-bit math so url_offset + url_len cannot wrap.
+    return static_cast<uint64_t>(e.url_offset) + e.url_len <= pool_size;
+}
+
 // Get URL string from v2 shard's URL pool
-inline std::string entry_url(const UrlIndexEntry& e, const char* url_pool) {
-    if (!url_pool || e.url_len == 0) return "";
+inline std::string entry_url(const UrlIndexEntry& e, const char* url_pool,
+                             uint32_t pool_size = 0) {
+    if (!url_pool || e.url_len == 0 || !entry_in_pool(e, pool_size)) return "";
     return std::string(url_pool + e.url_offset, e.url_len);
 }
 
 // Check if entry's URL starts with prefix (from v2 URL pool)
 inline bool entry_url_has_prefix(const UrlIndexEntry& e, const char* url_pool,
-                                  const std::string& prefix) {
-    if (!url_pool || e.url_len < prefix.size()) return false;
+                                  const std::string& prefix, uint32_t pool_size = 0) {
+    if (!url_pool || e.url_len < prefix.size() || !entry_in_pool(e, pool_size)) return false;
     return memcmp(url_pool + e.url_offset, prefix.data(), prefix.size()) == 0;
 }
 
 // Check if entry's host (extracted from URL in pool) contains substr
 // For search_host_substring: does URL's host part match?
 inline bool entry_host_contains(const UrlIndexEntry& e, const char* url_pool,
-                                 const std::string& substr) {
-    if (!url_pool || e.url_len == 0) return false;
+                                 const std::string& substr, uint32_t pool_size = 0) {
+    if (!url_pool || e.url_len == 0 || !entry_in_pool(e, pool_size)) return false;
     std::string_view url(url_pool + e.url_offset, e.url_len);
     // Extract host from URL
     auto pos = url.find("://");
