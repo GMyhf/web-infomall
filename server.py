@@ -7,7 +7,13 @@ Usage:
     python3 server.py                  # Start on http://localhost:5000
     python3 server.py --port 8080      # Custom port
     python3 server.py --db archive.db  # Custom database path
+
+NOTE: This is Phase 1 (Python prototype). For production, use the
+C++ Phase 2 server in src/:  ./src/serve <data_dir> <index_dir> [port]
 """
+
+import warnings
+warnings.warn("Phase 1 (Python) is deprecated. Use the C++ Phase 2 system in src/ for production.", DeprecationWarning, stacklevel=2)
 
 import argparse
 import os
@@ -427,6 +433,11 @@ def main():
     print(f"  Date range: {stats['first_date']} — {stats['last_date']}")
     print()
     print(f"Server: http://localhost:{args.port}")
+    print()
+    print("  *** DEPRECATED: This is Phase 1 (Python prototype). ***")
+    print("  For production use the C++ Phase 2 server in src/:")
+    print("    cd src && make && ./src/serve <data_dir> <index_dir> <port>")
+    print()
     print("Press Ctrl+C to stop.")
     print()
 

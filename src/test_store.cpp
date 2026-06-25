@@ -4,8 +4,8 @@
  * Usage: ./test_store <dat_file>
  */
 #include "common.h"
-#include "parser.cpp"
-#include "store.cpp"
+#include "parser.h"
+#include "store.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
         uint32_t date = static_cast<uint32_t>(atoi(art.time.c_str()));
         auto loc = store.write_article(art.url, date, art.title, art.body);
         if (count % 100 == 0) {
-            printf("  Wrote: %s offset=%d size=%u\n",
+            printf("  Wrote: %s offset=%lld size=%u\n",
                    loc.file_path.c_str(), loc.offset, loc.size);
         }
         count++;

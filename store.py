@@ -8,6 +8,9 @@ Designed to be compatible with Tianwang Format concepts:
 - Host index for host-based browsing.
 """
 
+import warnings
+warnings.warn("Phase 1 (Python) is deprecated. Use the C++ Phase 2 system in src/ for production.", DeprecationWarning, stacklevel=2)
+
 import sqlite3
 import time as _time
 from datetime import datetime, timedelta

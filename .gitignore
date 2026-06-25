@@ -12,6 +12,8 @@ sample_1000.dat
 # Compiled binaries
 src/load
 src/serve
+src/bench
+src/verify
 src/test_parse
 src/test_store
 src/debug_url

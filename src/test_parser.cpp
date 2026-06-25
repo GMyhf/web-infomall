@@ -4,7 +4,7 @@
  * Usage: ./test_parse <dat_file> [max_articles]
  */
 #include "common.h"
-#include "parser.cpp"
+#include "parser.h"
 #include <cstdio>
 #include <cstdlib>
 

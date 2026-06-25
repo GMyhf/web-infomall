@@ -9,7 +9,13 @@ Usage:
     python3 load_data.py --all            # Phase 2: load all files
     python3 load_data.py --files dat0,dat1,dat2  # Load specific files
     python3 load_data.py --max 10000      # Load at most 10K articles from dat0
+
+NOTE: This is Phase 1 (Python prototype). For production, use the
+C++ Phase 2 loader in src/:  ./src/load <dat_dir> <archive_dir>
 """
+
+import warnings
+warnings.warn("Phase 1 (Python) is deprecated. Use the C++ Phase 2 system in src/ for production.", DeprecationWarning, stacklevel=2)
 
 import argparse
 import os

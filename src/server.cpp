@@ -8,7 +8,7 @@
  */
 
 #include "common.h"
-#include "query.cpp"
+#include "query.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,11 +29,97 @@
 #include <set>
 #include <sys/time.h>
 #include <zlib.h>
+#include <signal.h>
+#include <cerrno>
+#include <cstdarg>
+#include <netinet/tcp.h>
 
 // ── Concurrency ──────────────────────────────────────────────
 
 constexpr int THREAD_POOL_SIZE = 4;
 constexpr int LISTEN_BACKLOG   = 128;
+constexpr int ACCEPT_TIMEOUT_S = 1;
+constexpr int KEEPALIVE_MAX_REQS = 10;
+constexpr int KEEPALIVE_TIMEOUT_S = 5;
+constexpr uint32_t MAX_REQUEST_SIZE = 32768;
+constexpr size_t BUF_READ_SIZE = 4096;
+
+// ── Signal handling ──────────────────────────────────────────
+
+static volatile sig_atomic_t server_running = 1;
+
+static void handle_signal(int) {
+    server_running = 0;
+}
+
+// ── Structured Logger ────────────────────────────────────────
+
+enum LogLevel { LOG_DBG, LOG_INF, LOG_WRN, LOG_ERR };
+
+struct Logger {
+    static void log(LogLevel level, const char* fmt, ...) {
+        time_t now = time(nullptr);
+        struct tm tm_val;
+        localtime_r(&now, &tm_val);
+        char tb[32];
+        strftime(tb, sizeof(tb), "%Y-%m-%d %H:%M:%S", &tm_val);
+        const char* ls[] = {"DBG", "INF", "WRN", "ERR"};
+        FILE* out = (level >= LOG_WRN) ? stderr : stdout;
+        fprintf(out, "[%s] [%s] ", tb, ls[level]);
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(out, fmt, ap);
+        va_end(ap);
+        fprintf(out, "\n");
+    }
+};
+
+#define LOG_DBG(...) Logger::log(LOG_DBG, __VA_ARGS__)
+#define LOG_INF(...) Logger::log(LOG_INF, __VA_ARGS__)
+#define LOG_WRN(...) Logger::log(LOG_WRN, __VA_ARGS__)
+#define LOG_ERR(...) Logger::log(LOG_ERR, __VA_ARGS__)
+
+// ── Simple Rate Limiter (per-IP, best-effort) ────────────────
+
+struct RateLimiter {
+    struct Bucket {
+        uint32_t ip;
+        time_t timestamps[20];
+        uint32_t head;
+        uint32_t count;
+    };
+    std::vector<Bucket> buckets_;
+    std::mutex mtx_;
+    time_t window_ = 5;      // 5 second window
+    uint32_t max_reqs_ = 30; // max requests per window
+
+    RateLimiter() { buckets_.reserve(1024); }
+
+    // Returns true if rate-limited (deny), false if allowed
+    bool check(uint32_t ip) {
+        time_t now = time(nullptr);
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (auto& b : buckets_) {
+            if (b.ip != ip) continue;
+            while (b.count > 0 && now - b.timestamps[(b.head - b.count + 20) % 20] > window_)
+                b.count--;
+            if (b.count >= max_reqs_) return true;
+            b.timestamps[b.head] = now;
+            b.head = (b.head + 1) % 20;
+            b.count++;
+            return false;
+        }
+        if (buckets_.size() < buckets_.capacity()) {
+            Bucket b{};
+            b.ip = ip;
+            b.head = 1;
+            b.count = 1;
+            b.timestamps[0] = now;
+            buckets_.push_back(b);
+        }
+        return false;
+    }
+};
 
 // ── HTML Helpers ──────────────────────────────────────────────
 
@@ -608,8 +694,53 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
         html += "</div>";
     }
 
-    html += "<div class=\"page-body\">"
-            + html_escape(art.body.empty() ? "(无内容)" : art.body) + "</div>";
+    // ── Auto-link bare URLs in body text ─────────────────────
+    std::string body_html;
+    {
+        std::string raw_body = art.body.empty() ? "(无内容)" : art.body;
+        body_html.reserve(raw_body.size() * 12 / 10);
+        size_t pos = 0;
+        // Simple URL auto-linking: http:// and https:// patterns
+        while (pos < raw_body.size()) {
+            auto url_start = raw_body.find("http://", pos);
+            auto https_start = raw_body.find("https://", pos);
+            size_t found = std::string::npos;
+            if (url_start != std::string::npos && (https_start == std::string::npos || url_start < https_start))
+                found = url_start;
+            else if (https_start != std::string::npos)
+                found = https_start;
+
+            if (found == std::string::npos || found > raw_body.size()) {
+                body_html.append(html_escape(raw_body.substr(pos)));
+                break;
+            }
+            body_html.append(html_escape(raw_body.substr(pos, found - pos)));
+            // Find end of URL (space, punctuation, or end)
+            size_t url_end = found;
+            while (url_end < raw_body.size() && raw_body[url_end] != ' ' &&
+                   raw_body[url_end] != '\n' && raw_body[url_end] != '\t' &&
+                   raw_body[url_end] != '\r') url_end++;
+            std::string url = raw_body.substr(found, url_end - found);
+            body_html += "<a href=\"/replay?url=" + url_encode(url) + "\">"
+                       + html_escape(url) + "</a>";
+            pos = url_end;
+        }
+    }
+
+    // Archive replay banner — injected above the page-body
+    html += "<div style=\"background:var(--info-soft);border:1px solid #c9dcd8;border-radius:8px;padding:12px 16px;margin:12px 0;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px\">"
+            "<span style=\"font-size:.9rem;color:var(--brand-2)\">"
+            "📅 存档日期: <strong>" + fmt_date(art.date) + "</strong>"
+            " · 🏠 " + html_escape(host) + "</span>"
+            "<span style=\"display:flex;gap:6px;flex-wrap:wrap\">";
+    if (vers.size() > 1) {
+        html += "<a href=\"/calendar?url=" + url_encode(url) + "\" style=\"padding:4px 10px;background:var(--brand);color:#fff;border-radius:4px;font-size:.82rem;font-weight:650;text-decoration:none\">📋 全部 " + std::to_string(vers.size()) + " 个版本</a>";
+    }
+    html += "<a href=\"/replay?url=" + url_encode(url) + "\" style=\"padding:4px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;font-size:.82rem;color:var(--muted);text-decoration:none\">🔗 永久链接</a>"
+            "<a href=\"/proxy?url=" + url_encode(url) + "\" style=\"padding:4px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;font-size:.82rem;color:var(--muted);text-decoration:none\">📄 原始内容</a>"
+            "</span></div>";
+
+    html += "<div class=\"page-body\">" + body_html + "</div>";
 
     // Metadata panel: technical details about the archived record
     html += "<details class=\"meta-panel\"><summary>📋 存档详情</summary><div class=\"meta-grid\">";
@@ -1118,6 +1249,7 @@ static std::string build_diff(QueryEngine& qe, const std::string& url,
 
     html += "<div class=\"diff-section\"><h3>正文差异</h3>";
     int total_changes = 0;
+    int unchanged_count = 0;
     for (auto& c : chunks) {
         if (c.type == DiffChunk::ADDED) {
             html += "<div class=\"diff-added\"><span class=\"diff-label\">+ 新增</span>"
@@ -1129,7 +1261,6 @@ static std::string build_diff(QueryEngine& qe, const std::string& url,
             total_changes++;
         } else {
             // Show only some unchanged context
-            static int unchanged_count = 0;
             unchanged_count++;
             if (unchanged_count <= 3) {
                 html += "<div class=\"diff-unchanged\">" + html_escape(c.text) + "</div>";
@@ -1250,7 +1381,8 @@ static std::string build_stats_page(QueryEngine& qe) {
 static void send_response(int fd, int code, const std::string& content_type,
                            const std::string& body, bool gzip_ok = false,
                            const std::string& etag = "",
-                           time_t last_modified = 0) {
+                           time_t last_modified = 0,
+                           bool keep_alive = false) {
     std::string response_body = body;
     bool is_gzipped = false;
 
@@ -1265,25 +1397,28 @@ static void send_response(int fd, int code, const std::string& content_type,
     char hdr[1024];
     int hdr_len;
 
+    const char* conn_hdr = keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
+
     if (etag.empty() && last_modified == 0) {
         // Simple response
         hdr_len = snprintf(hdr, sizeof(hdr),
-            "HTTP/1.0 %d OK\r\n"
+            "HTTP/1.1 %d OK\r\n"
             "Content-Type: %s\r\n"
             "Content-Length: %zu\r\n"
-            "Connection: close\r\n"
+            "%s"
             "Server: WebInfoMall/2.0\r\n"
             "%s"
             "\r\n",
             code, content_type.c_str(), response_body.size(),
+            conn_hdr,
             is_gzipped ? "Content-Encoding: gzip\r\n" : "");
     } else {
         // Response with caching headers
         hdr_len = snprintf(hdr, sizeof(hdr),
-            "HTTP/1.0 %d OK\r\n"
+            "HTTP/1.1 %d OK\r\n"
             "Content-Type: %s\r\n"
             "Content-Length: %zu\r\n"
-            "Connection: close\r\n"
+            "%s"
             "Server: WebInfoMall/2.0\r\n"
             "%s"
             "%s"
@@ -1291,6 +1426,7 @@ static void send_response(int fd, int code, const std::string& content_type,
             "Cache-Control: public, max-age=86400\r\n"
             "\r\n",
             code, content_type.c_str(), response_body.size(),
+            conn_hdr,
             is_gzipped ? "Content-Encoding: gzip\r\n" : "",
             etag.empty() ? "" : ("ETag: " + etag + "\r\n").c_str(),
             last_modified ? ("Last-Modified: " + http_date(last_modified) + "\r\n").c_str() : "");
@@ -1300,93 +1436,254 @@ static void send_response(int fd, int code, const std::string& content_type,
     write(fd, response_body.data(), response_body.size());
 }
 
-static void send_304(int fd, const std::string& etag) {
-    char hdr[256];
+static void send_status_response(int fd, int code, const char* status_text,
+                                  const std::string& content_type,
+                                  const std::string& body) {
+    char hdr[512];
     int hdr_len = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.0 304 Not Modified\r\n"
-        "ETag: %s\r\n"
-        "Cache-Control: public, max-age=86400\r\n"
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "Server: WebInfoMall/2.0\r\n"
         "\r\n",
-        etag.c_str());
+        code, status_text, content_type.c_str(), body.size());
+    write(fd, hdr, hdr_len);
+    write(fd, body.data(), body.size());
+}
+
+static void send_304(int fd, const std::string& etag, bool keep_alive = false) {
+    char hdr[256];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 304 Not Modified\r\n"
+        "ETag: %s\r\n"
+        "Cache-Control: public, max-age=86400\r\n"
+        "%s"
+        "Server: WebInfoMall/2.0\r\n"
+        "\r\n",
+        etag.c_str(),
+        keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n");
     write(fd, hdr, hdr_len);
 }
 
-static void send_redirect(int fd, const std::string& location) {
+static void send_redirect(int fd, const std::string& location, bool keep_alive = false) {
     char hdr[512];
     int hdr_len = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.0 302 Found\r\n"
+        "HTTP/1.1 302 Found\r\n"
         "Location: %s\r\n"
-        "Connection: close\r\n"
+        "%s"
         "Server: WebInfoMall/2.0\r\n"
         "\r\n",
-        location.c_str());
+        location.c_str(),
+        keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n");
     write(fd, hdr, hdr_len);
+}
+
+// ── Topic / Hot Event Timeline ──────────────────────────────
+
+static std::string build_topic(QueryEngine& qe, const std::string& query) {
+    auto results = qe.search_by_title(query, 100);
+
+    char buf[65536];
+    std::string stitle = "热点事件: " + query;
+    snprintf(buf, sizeof(buf), PAGE_HEADER, stitle.c_str());
+    std::string html = buf;
+
+    html += R"(<div class="nav-links"><a href="/">返回首页</a></div>)";
+    html += R"(<h2>🔥 热点事件回溯: <strong>)" + html_escape(query) + R"(</strong></h2>)";
+
+    if (results.empty()) {
+        html += R"(<div class="notice">未找到包含 <strong>)" + html_escape(query) + R"(</strong> 的标题。</div>)";
+        html += R"(<section class="search-panel"><div class="search-bar">)"
+                R"(<form action="/topic" method="get">)"
+                R"(<input type="text" name="q" value=")" + html_escape(query) + R"(">)"
+                R"(<button>搜索</button></form></div></section>)";
+        html += PAGE_FOOTER;
+        return html;
+    }
+
+    std::map<uint32_t, int> date_counts;
+    std::set<std::string> sources;
+    uint32_t date_min = 99999999, date_max = 0;
+    for (auto& r : results) {
+        date_counts[r.date / 100]++;
+        sources.insert(extract_host(r.url));
+        if (r.date < date_min) date_min = r.date;
+        if (r.date > date_max) date_max = r.date;
+    }
+
+    snprintf(buf, sizeof(buf),
+        R"(<div class="stats">)"
+        R"(<div class="stat-card"><div class="number">%zu</div><div class="label">相关报道</div></div>)"
+        R"(<div class="stat-card"><div class="number">%zu</div><div class="label">来源站点</div></div>)"
+        R"(<div class="stat-card"><div class="number">%s - %s</div><div class="label">时间范围</div></div>)"
+        R"(</div>)",
+        results.size(), sources.size(),
+        fmt_date(date_min).c_str(), fmt_date(date_max).c_str());
+    html += buf;
+
+    if (date_counts.size() >= 2) {
+        int max_count = 0;
+        for (auto& dc : date_counts) if (dc.second > max_count) max_count = dc.second;
+        html += R"(<h3 style="font-size:.9rem;color:#7b7166;margin:12px 0 4px">📊 报道强度</h3>)";
+        html += R"(<div class="home-year-chart">)";
+        for (auto& dc : date_counts) {
+            int pct = max_count > 0 ? (dc.second * 100 / max_count) : 0;
+            if (pct < 4) pct = 4;
+            uint32_t year = dc.first / 100;
+            uint32_t month = dc.first % 100;
+            snprintf(buf, sizeof(buf),
+                R"(<div class="hy-bar" style="height:%d%%">)"
+                R"(<span class="hy-tip">%04u-%02u: %d 篇</span></div>)", pct, year, month, dc.second);
+            html += buf;
+        }
+        html += "</div>";
+    }
+
+    html += R"(<h3 style="margin:20px 0 10px">📰 按时间线</h3>)";
+    html += R"(<div class="timeline">)";
+
+    std::string last_month;
+    for (auto& r : results) {
+        uint32_t ym = r.date / 100;
+        std::string ym_str = fmt_date(ym * 100 + 1).substr(0, 7);
+        if (ym_str != last_month) {
+            if (!last_month.empty()) html += "</div>";
+            last_month = ym_str;
+            snprintf(buf, sizeof(buf),
+                R"(<div class="tl-year-marker"><span class="tl-year">%s</span></div>)", ym_str.c_str());
+            html += buf;
+        }
+        std::string host = extract_host(r.url);
+        html += R"(<div class="tl-item">)"
+                R"(<a href="/replay?url=)" + url_encode(r.url) + R"(">)"
+                R"(<span class="tl-date">)" + fmt_date(r.date) + R"(</span></a>)"
+                R"(<span style="color:var(--muted);font-size:.82rem">🏠 )" + html_escape(host) + "</span>";
+        if (!r.title.empty()) {
+            html += R"(<br><span style="font-size:.9rem;color:#344054">)" + html_escape(r.title) + "</span>";
+        }
+        html += "</div>";
+    }
+    if (!results.empty()) html += "</div>";
+
+    html += R"(<h3 style="margin-top:24px">来源分布</h3><div class="top-domains">)";
+    std::map<std::string, int> host_counts;
+    for (auto& r : results) host_counts[extract_host(r.url)]++;
+    for (auto& [host, count] : host_counts) {
+        html += R"(<div class="td-row"><a href="/host?h=)" + url_encode(host) + R"(">)"
+                + html_escape(host) + "</a>"
+                R"(<span class="td-count">)" + std::to_string(count) + R"( 篇</span></div>)";
+    }
+    html += "</div>";
+
+    html += PAGE_FOOTER;
+    return html;
+}
+
+// ── Proxy Handler ─────────────────────────────────────────────
+
+static void handle_proxy(QueryEngine& qe, int csock, const std::string& url,
+                          bool gzip_ok, bool keep_alive) {
+    auto art = qe.get_page(url);
+    if (art.url.empty() || art.body.empty()) {
+        std::string msg = "404 Not Found: " + url;
+        send_status_response(csock, 404, "Not Found",
+                             "text/plain; charset=utf-8", msg);
+        return;
+    }
+    std::string ct = url_content_type(url);
+    bool use_gzip = gzip_ok && ct.find("image/") != 0 && ct.find("font/") != 0;
+    send_response(csock, 200, ct, art.body, use_gzip, "", 0, keep_alive);
 }
 
 // ── Request Handler ───────────────────────────────────────────
 
-static void handle_request(QueryEngine& qe, int csock) {
-    char buf[8192];
-    ssize_t n = read(csock, buf, sizeof(buf) - 1);
-    if (n <= 0) { close(csock); return; }
-    buf[n] = '\0';
+// Returns true if the caller should keep the connection alive
+static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
+    // Buffered read loop — read until we have complete headers
+    std::string req_data;
+    req_data.reserve(4096);
+    while (req_data.find("\r\n\r\n") == std::string::npos) {
+        if (req_data.size() >= MAX_REQUEST_SIZE) {
+            LOG_WRN("Request too large (%zu bytes), closing", req_data.size());
+            close(csock);
+            return false;
+        }
+        char tmp[BUF_READ_SIZE];
+        ssize_t n = read(csock, tmp, sizeof(tmp));
+        if (n <= 0) { close(csock); return false; }
+        req_data.append(tmp, n);
+    }
 
-    auto req = parse_request(buf, n);
+    auto req = parse_request(req_data.data(), req_data.size());
+
+    // Rate limiting
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof(peer);
+    if (getpeername(csock, (sockaddr*)&peer, &plen) == 0) {
+        if (limiter.check(peer.sin_addr.s_addr)) {
+            LOG_WRN("Rate limit exceeded for %s", inet_ntoa(peer.sin_addr));
+            send_status_response(csock, 429, "Too Many Requests",
+                "text/plain", "429 Too Many Requests\n");
+            close(csock);
+            return false;
+        }
+    }
+
     struct timeval tv0, tv1;
     gettimeofday(&tv0, nullptr);
+
+    bool wants_keepalive = (req_data.find("Connection: keep-alive") != std::string::npos ||
+                            req_data.find("Connection: Keep-Alive") != std::string::npos);
 
     std::string response;
     std::string content_type = "text/html; charset=utf-8";
     int code = 200;
 
     if (req.path == "/") {
-        // ETag based on total article count (changes only on re-index)
         uint32_t total, urls, dmin, dmax;
         qe.get_stats(total, urls, dmin, dmax);
         std::string etag = "\"home-" + std::to_string(total) + "\"";
         if (!req.etag_if_none_match.empty() && req.etag_if_none_match == etag) {
-            send_304(csock, etag);
+            send_304(csock, etag, wants_keepalive);
             close(csock);
-            return;
+            goto done;
         }
         response = build_home(qe);
-        send_response(csock, code, content_type, response, req.accepts_gzip);
+        send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
     }
     else if (req.path == "/search") {
         std::string q = get_param(req.query, "q");
         if (q.empty()) {
             response = build_home(qe);
         } else if (q.find("http://") == 0 || q.find("https://") == 0) {
-            send_redirect(csock, "/replay?url=" + url_encode(q));
+            send_redirect(csock, "/replay?url=" + url_encode(q), wants_keepalive);
             close(csock);
-            return;
+            goto done;
         } else {
             response = build_search(qe, q);
         }
-        send_response(csock, code, content_type, response, req.accepts_gzip);
+        send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
     }
     else if (req.path == "/replay") {
         std::string url = get_param(req.query, "url");
         if (url.empty()) {
             response = build_home(qe);
-            send_response(csock, code, content_type, response, req.accepts_gzip);
+            send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
         } else {
             auto art = qe.get_page(url);
             if (art.url.empty()) {
-                response = build_replay(qe, url); // generates 404 page
+                response = build_replay(qe, url);
                 code = 404;
-                send_response(csock, code, content_type, response, req.accepts_gzip);
+                send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
             } else {
                 std::string etag = make_etag(art.url, art.date);
                 if (!req.etag_if_none_match.empty() && req.etag_if_none_match == etag) {
-                    send_304(csock, etag);
+                    send_304(csock, etag, wants_keepalive);
                     close(csock);
-                    return;
+                    goto done;
                 }
                 response = build_replay(qe, url);
-                // Set Last-Modified to the crawl date
                 time_t lm = 0;
                 if (art.date >= 19910101) {
                     struct tm tm_val = {};
@@ -1396,70 +1693,90 @@ static void handle_request(QueryEngine& qe, int csock) {
                     lm = timegm(&tm_val);
                 }
                 send_response(csock, code, content_type, response,
-                              req.accepts_gzip, etag, lm);
+                              req.accepts_gzip, etag, lm, wants_keepalive);
             }
         }
+    }
+    else if (req.path == "/topic") {
+        std::string q = get_param(req.query, "q");
+        if (q.empty()) {
+            send_redirect(csock, "/", wants_keepalive);
+            close(csock);
+            goto done;
+        }
+        response = build_topic(qe, q);
+        send_response(csock, 200, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
+    }
+    else if (req.path == "/proxy") {
+        std::string url = get_param(req.query, "url");
+        if (url.empty()) {
+            send_redirect(csock, "/", wants_keepalive);
+            close(csock);
+            goto done;
+        }
+        handle_proxy(qe, csock, url, req.accepts_gzip, wants_keepalive);
+        // handle_proxy does NOT close the socket if keep_alive
     }
     else if (req.path == "/calendar") {
         std::string url = get_param(req.query, "url");
         response = url.empty() ? build_home(qe) : build_calendar(qe, url);
-        send_response(csock, code, content_type, response, req.accepts_gzip);
+        send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
     }
     else if (req.path == "/host") {
         std::string host = get_param(req.query, "h");
         if (host.empty()) {
-            send_redirect(csock, "/");
+            send_redirect(csock, "/", wants_keepalive);
             close(csock);
-            return;
+            goto done;
         }
         response = build_host(qe, host);
-        send_response(csock, code, content_type, response, req.accepts_gzip);
+        send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
     }
     else if (req.path == "/random") {
         std::string url = qe.get_random_url();
         if (url.empty()) {
-            send_redirect(csock, "/");
+            send_redirect(csock, "/", wants_keepalive);
         } else {
-            send_redirect(csock, "/replay?url=" + url_encode(url));
+            send_redirect(csock, "/replay?url=" + url_encode(url), wants_keepalive);
         }
         close(csock);
-        return;
+        goto done;
     }
     else if (req.path == "/sitemap") {
         std::string host = get_param(req.query, "h");
         if (host.empty()) {
-            send_redirect(csock, "/");
+            send_redirect(csock, "/", wants_keepalive);
             close(csock);
-            return;
+            goto done;
         }
         response = build_sitemap(qe, host);
-        send_response(csock, code, content_type, response, req.accepts_gzip);
+        send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
     }
     else if (req.path == "/browse") {
         std::string date_str = get_param(req.query, "d");
         response = build_browse(qe, date_str);
-        send_response(csock, code, content_type, response, req.accepts_gzip);
+        send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
     }
     else if (req.path == "/diff") {
         std::string url = get_param(req.query, "url");
         std::string a_str = get_param(req.query, "a");
         std::string b_str = get_param(req.query, "b");
         if (url.empty() || a_str.empty() || b_str.empty()) {
-            send_redirect(csock, "/");
+            send_redirect(csock, "/", wants_keepalive);
             close(csock);
-            return;
+            goto done;
         }
         uint32_t da = static_cast<uint32_t>(atoi(a_str.c_str()));
         uint32_t db = static_cast<uint32_t>(atoi(b_str.c_str()));
         response = build_diff(qe, url, da, db);
-        send_response(csock, code, content_type, response, req.accepts_gzip);
+        send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
     }
     else if (req.path == "/ping") {
-        send_response(csock, 200, "text/plain", "pong");
+        send_response(csock, 200, "text/plain", "pong", false, "", 0, wants_keepalive);
     }
     else if (req.path == "/stats-page") {
         response = build_stats_page(qe);
-        send_response(csock, code, content_type, response, req.accepts_gzip);
+        send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
     }
     else if (req.path == "/stats") {
         uint32_t total, urls, dmin, dmax;
@@ -1469,7 +1786,8 @@ static void handle_request(QueryEngine& qe, int csock) {
             "{\"total\":%u,\"hosts\":%u,\"date_min\":%u,\"date_max\":%u,"
             "\"server\":\"WebInfoMall/2.0\",\"threads\":%d}",
             total, urls, dmin, dmax, THREAD_POOL_SIZE);
-        send_response(csock, 200, "application/json; charset=utf-8", json);
+        send_response(csock, 200, "application/json; charset=utf-8", json,
+                      false, "", 0, wants_keepalive);
     }
     else {
         // Proper 404 page with navigation
@@ -1484,28 +1802,36 @@ static void handle_request(QueryEngine& qe, int csock) {
                 "<input type=\"text\" name=\"q\" placeholder=\"搜索历史网页...\">"
                 "<button>搜索</button></form></div></section>";
         html += PAGE_FOOTER;
-        send_response(csock, 404, content_type, html, req.accepts_gzip);
+        send_response(csock, 404, content_type, html, req.accepts_gzip, "", 0, wants_keepalive);
     }
 
+done:
     gettimeofday(&tv1, nullptr);
     double ms = (tv1.tv_sec - tv0.tv_sec) * 1000.0 + (tv1.tv_usec - tv0.tv_usec) / 1000.0;
-    printf("[%s] %s?%s -> %d %.1fms\n",
-           req.method.c_str(), req.path.c_str(), req.query.c_str(), code, ms);
-    close(csock);
+    LOG_INF("%s %s?%s -> %d (%.1fms)",
+            req.method.c_str(), req.path.c_str(), req.query.c_str(), code, ms);
+
+    if (!wants_keepalive) {
+        close(csock);
+        return false;
+    }
+    return true; // keep connection alive
 }
 
 // ── Thread Pool ───────────────────────────────────────────────
 
 class ThreadPool {
     std::vector<std::thread> workers_;
-    std::queue<int> queue_;               // client sockets
+    std::queue<int> queue_;
     std::mutex mtx_;
     std::condition_variable cv_;
     bool stop_ = false;
     QueryEngine& qe_;
+    RateLimiter& limiter_;
 
 public:
-    ThreadPool(QueryEngine& qe, int n_workers = THREAD_POOL_SIZE) : qe_(qe) {
+    ThreadPool(QueryEngine& qe, RateLimiter& limiter, int n_workers = THREAD_POOL_SIZE)
+        : qe_(qe), limiter_(limiter) {
         for (int i = 0; i < n_workers; i++) {
             workers_.emplace_back([this] { worker_loop(); });
         }
@@ -1541,7 +1867,17 @@ private:
                 csock = queue_.front();
                 queue_.pop();
             }
-            handle_request(qe_, csock);
+
+            // Handle request with keep-alive loop
+            for (int ka_count = 0; ka_count < KEEPALIVE_MAX_REQS; ka_count++) {
+                bool keep_alive = handle_request(qe_, csock, limiter_);
+                if (!keep_alive) break;
+
+                // Set socket timeout for next read on keep-alive
+                struct timeval tv = {KEEPALIVE_TIMEOUT_S, 0};
+                setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            }
+            close(csock);
         }
     }
 };
@@ -1567,24 +1903,39 @@ static int run_server(QueryEngine& qe, int port) {
         perror("listen"); close(sock); return 1;
     }
 
-    ThreadPool pool(qe);
+    // Register signal handlers for graceful shutdown
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+
+    // Set accept timeout so we can poll the shutdown flag
+    struct timeval tv = {ACCEPT_TIMEOUT_S, 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    RateLimiter limiter;
+    ThreadPool pool(qe, limiter);
 
     printf("Server: http://localhost:%d  (workers=%d)\n", port, THREAD_POOL_SIZE);
     printf("Press Ctrl+C to stop.\n");
 
-    while (true) {
+    while (server_running) {
         sockaddr_in client;
         socklen_t clen = sizeof(client);
         int csock = accept(sock, (sockaddr*)&client, &clen);
         if (csock < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                // Timeout or signal — recheck server_running
+                continue;
+            }
             perror("accept");
             continue;
         }
         pool.enqueue(csock);
     }
 
+    printf("\nShutting down...\n");
     pool.shutdown();
     close(sock);
+    printf("Server stopped.\n");
     return 0;
 }
 

@@ -6,6 +6,9 @@ as article separator. Fields: id, time, url, title, body.
 Encoding: GB2312/GBK for Chinese text fields.
 """
 
+import warnings
+warnings.warn("Phase 1 (Python) is deprecated. Use the C++ Phase 2 system in src/ for production.", DeprecationWarning, stacklevel=2)
+
 import re
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
