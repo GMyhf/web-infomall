@@ -288,7 +288,8 @@ inline std::string url_content_type(const std::string& url) {
     if (ext == ".xml")  return "application/xml";
     if (ext == ".json") return "application/json";
     if (ext == ".pdf")  return "application/pdf";
-    if (ext == ".ico" || ext == ".svg")  return "image/svg+xml";
+    if (ext == ".ico")  return "image/x-icon";
+    if (ext == ".svg")  return "image/svg+xml";
     if (ext == ".woff" || ext == ".woff2") return "font/woff2";
     if (ext == ".ttf")  return "font/ttf";
     if (ext == ".txt" || ext == ".text") return "text/plain; charset=utf-8";

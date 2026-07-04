@@ -27,6 +27,7 @@
 #include <ctime>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <sys/time.h>
 #include <zlib.h>
 #include <signal.h>
@@ -86,42 +87,42 @@ struct RateLimiter {
     // overwritten before they expire and the sliding-window count goes wrong.
     static constexpr uint32_t WINDOW_SLOTS = 32;
     struct Bucket {
-        uint32_t ip;
         time_t timestamps[WINDOW_SLOTS];
         uint32_t head;
         uint32_t count;
+        time_t last_seen;
     };
-    std::vector<Bucket> buckets_;
+    std::unordered_map<uint32_t, Bucket> buckets_;
     std::mutex mtx_;
     time_t window_ = 5;      // 5 second window
     uint32_t max_reqs_ = 30; // max requests per window (must be <= WINDOW_SLOTS)
+    uint32_t checks_since_sweep_ = 0;
     static_assert(WINDOW_SLOTS >= 30, "WINDOW_SLOTS must hold a full window of requests");
-
-    RateLimiter() { buckets_.reserve(1024); }
 
     // Returns true if rate-limited (deny), false if allowed
     bool check(uint32_t ip) {
         time_t now = time(nullptr);
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& b : buckets_) {
-            if (b.ip != ip) continue;
-            while (b.count > 0 &&
-                   now - b.timestamps[(b.head - b.count + WINDOW_SLOTS) % WINDOW_SLOTS] > window_)
-                b.count--;
-            if (b.count >= max_reqs_) return true;
-            b.timestamps[b.head] = now;
-            b.head = (b.head + 1) % WINDOW_SLOTS;
-            b.count++;
-            return false;
+
+        // Periodically drop buckets idle past the window so the map can't
+        // grow without bound (and new IPs always get tracked).
+        if (++checks_since_sweep_ >= 4096) {
+            checks_since_sweep_ = 0;
+            for (auto it = buckets_.begin(); it != buckets_.end(); ) {
+                if (now - it->second.last_seen > window_) it = buckets_.erase(it);
+                else ++it;
+            }
         }
-        if (buckets_.size() < buckets_.capacity()) {
-            Bucket b{};
-            b.ip = ip;
-            b.head = 1;
-            b.count = 1;
-            b.timestamps[0] = now;
-            buckets_.push_back(b);
-        }
+
+        Bucket& b = buckets_[ip];  // creates zeroed bucket for new IPs
+        b.last_seen = now;
+        while (b.count > 0 &&
+               now - b.timestamps[(b.head - b.count + WINDOW_SLOTS) % WINDOW_SLOTS] > window_)
+            b.count--;
+        if (b.count >= max_reqs_) return true;
+        b.timestamps[b.head] = now;
+        b.head = (b.head + 1) % WINDOW_SLOTS;
+        b.count++;
         return false;
     }
 };
@@ -353,13 +354,34 @@ static std::string url_decode(const std::string& s) {
     return r;
 }
 
+// ── Socket write helper ──────────────────────────────────────
+
+// write() on a socket may write fewer bytes than asked (large responses) —
+// loop until everything is out or the peer is gone.
+static bool write_all(int fd, const void* data, size_t len) {
+    const char* p = static_cast<const char*>(data);
+    while (len > 0) {
+        ssize_t n = ::write(fd, p, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        p += n;
+        len -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
 // ── Gzip Compression ──────────────────────────────────────────
 
 static bool gzip_compress(const std::string& input, std::string& output) {
     if (input.size() < 1024) return false; // Only compress if worth it
 
     z_stream zs = {};
-    if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED,
+    // Level 6: near-identical ratio to 9 on HTML at a fraction of the CPU —
+    // compression runs synchronously on worker threads.
+    if (deflateInit2(&zs, 6, Z_DEFLATED,
                      15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
         return false;
 
@@ -631,8 +653,9 @@ static std::string build_search(QueryEngine& qe, const std::string& query) {
     return html;
 }
 
-static std::string build_replay(QueryEngine& qe, const std::string& url) {
-    auto art = qe.get_page(url);
+static std::string build_replay(QueryEngine& qe, const std::string& url,
+                                 uint32_t req_date = 0) {
+    auto art = qe.get_page(url, req_date);
     if (art.url.empty()) {
         char hdr[32768];
         snprintf(hdr, sizeof(hdr), PAGE_HEADER, "未找到");
@@ -757,7 +780,7 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
     if (vers.size() > 1) {
         html += "<a href=\"/calendar?url=" + url_encode(url) + "\" style=\"padding:4px 10px;background:var(--brand);color:#fff;border-radius:4px;font-size:.82rem;font-weight:650;text-decoration:none\">📋 全部 " + std::to_string(vers.size()) + " 个版本</a>";
     }
-    html += "<a href=\"/replay?url=" + url_encode(url) + "\" style=\"padding:4px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;font-size:.82rem;color:var(--muted);text-decoration:none\">🔗 永久链接</a>"
+    html += "<a href=\"/replay?url=" + url_encode(url) + "&date=" + std::to_string(art.date) + "\" style=\"padding:4px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;font-size:.82rem;color:var(--muted);text-decoration:none\">🔗 永久链接</a>"
             "<a href=\"/proxy?url=" + url_encode(url) + "\" style=\"padding:4px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;font-size:.82rem;color:var(--muted);text-decoration:none\">📄 原始内容</a>"
             "</span></div>";
 
@@ -774,7 +797,12 @@ static std::string build_replay(QueryEngine& qe, const std::string& url) {
         "<div class=\"meta-cell\"><span class=\"mk\">URL 路径</span><span class=\"mv\">%s</span></div>",
         fmt_date(art.date).c_str(),
         html_escape(host).c_str(),
-        html_escape(url.substr(url.find(host) + host.size())).c_str());
+        // host is lowercased by extract_host but url keeps original case, so
+        // find() can miss — falling through to npos+size() would throw and
+        // kill the worker. Show the full URL in that case.
+        html_escape(url.find(host) != std::string::npos
+                        ? url.substr(url.find(host) + host.size())
+                        : url).c_str());
     html += buf;
 
     // Version stats
@@ -1102,10 +1130,21 @@ static std::string build_browse(QueryEngine& qe, const std::string& date_str) {
     qe.get_stats(total, urls, dmin, dmax);
     uint32_t min_year = dmin / 10000, max_year = dmax / 10000;
 
+    // <input type=date> submits YYYY-MM-DD while the year quick-links use
+    // YYYYMMDD — normalize both to 8 digits before comparing crawl dates.
+    std::string digits;
+    for (char c : date_str)
+        if (c >= '0' && c <= '9') digits += c;
+
+    // The date input only displays its value in YYYY-MM-DD form.
+    std::string input_value;
+    if (digits.size() == 8)
+        input_value = digits.substr(0, 4) + "-" + digits.substr(4, 2) + "-" + digits.substr(6, 2);
+
     html += "<h2>📅 按日期浏览</h2>";
     html += "<div class=\"date-browse-bar\"><form action=\"/browse\" method=\"get\">"
             "<label>选择日期：</label>"
-            "<input type=\"date\" name=\"d\" value=\"" + html_escape(date_str) + "\">"
+            "<input type=\"date\" name=\"d\" value=\"" + html_escape(input_value) + "\">"
             "<button>浏览</button></form>";
     html += "<div class=\"date-quick-grid\"><span style=\"font-size:.82rem;color:var(--muted)\">快速跳转：</span>";
 
@@ -1116,8 +1155,8 @@ static std::string build_browse(QueryEngine& qe, const std::string& date_str) {
     }
     html += "</div></div>";
 
-    if (!date_str.empty() && date_str.size() >= 8) {
-        uint32_t date = static_cast<uint32_t>(atoi(date_str.c_str()));
+    if (digits.size() == 8) {
+        uint32_t date = static_cast<uint32_t>(atoi(digits.c_str()));
         auto results = qe.get_by_date(date, 500);
 
         if (results.empty()) {
@@ -1402,62 +1441,55 @@ static std::string build_stats_page(QueryEngine& qe) {
 
 // ── HTTP Response ─────────────────────────────────────────────
 
+static const char* status_reason(int code) {
+    switch (code) {
+        case 200: return "OK";
+        case 304: return "Not Modified";
+        case 302: return "Found";
+        case 404: return "Not Found";
+        case 429: return "Too Many Requests";
+        case 500: return "Internal Server Error";
+        default:  return "OK";
+    }
+}
+
 static void send_response(int fd, int code, const std::string& content_type,
                            const std::string& body, bool gzip_ok = false,
                            const std::string& etag = "",
                            time_t last_modified = 0,
-                           bool keep_alive = false) {
-    std::string response_body = body;
+                           bool keep_alive = false,
+                           const std::string& extra_headers = "") {
+    // Point at the body instead of copying it — bodies can be multi-MB and
+    // the copy was pure overhead on the (common) uncompressed path.
+    const std::string* out = &body;
+    std::string compressed;
     bool is_gzipped = false;
 
-    if (gzip_ok) {
-        std::string compressed;
-        if (gzip_compress(body, compressed)) {
-            response_body = compressed;
-            is_gzipped = true;
-        }
+    if (gzip_ok && gzip_compress(body, compressed)) {
+        out = &compressed;
+        is_gzipped = true;
     }
 
-    char hdr[1024];
-    int hdr_len;
+    std::string hdr;
+    hdr.reserve(512 + extra_headers.size());
+    char line[256];
+    snprintf(line, sizeof(line), "HTTP/1.1 %d %s\r\n", code, status_reason(code));
+    hdr += line;
+    hdr += "Content-Type: " + content_type + "\r\n";
+    snprintf(line, sizeof(line), "Content-Length: %zu\r\n", out->size());
+    hdr += line;
+    hdr += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
+    hdr += "Server: WebInfoMall/2.0\r\n";
+    if (is_gzipped) hdr += "Content-Encoding: gzip\r\n";
+    if (!etag.empty()) hdr += "ETag: " + etag + "\r\n";
+    if (last_modified) hdr += "Last-Modified: " + http_date(last_modified) + "\r\n";
+    if (!etag.empty() || last_modified)
+        hdr += "Cache-Control: public, max-age=86400\r\n";
+    hdr += extra_headers;
+    hdr += "\r\n";
 
-    const char* conn_hdr = keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
-
-    if (etag.empty() && last_modified == 0) {
-        // Simple response
-        hdr_len = snprintf(hdr, sizeof(hdr),
-            "HTTP/1.1 %d OK\r\n"
-            "Content-Type: %s\r\n"
-            "Content-Length: %zu\r\n"
-            "%s"
-            "Server: WebInfoMall/2.0\r\n"
-            "%s"
-            "\r\n",
-            code, content_type.c_str(), response_body.size(),
-            conn_hdr,
-            is_gzipped ? "Content-Encoding: gzip\r\n" : "");
-    } else {
-        // Response with caching headers
-        hdr_len = snprintf(hdr, sizeof(hdr),
-            "HTTP/1.1 %d OK\r\n"
-            "Content-Type: %s\r\n"
-            "Content-Length: %zu\r\n"
-            "%s"
-            "Server: WebInfoMall/2.0\r\n"
-            "%s"
-            "%s"
-            "%s"
-            "Cache-Control: public, max-age=86400\r\n"
-            "\r\n",
-            code, content_type.c_str(), response_body.size(),
-            conn_hdr,
-            is_gzipped ? "Content-Encoding: gzip\r\n" : "",
-            etag.empty() ? "" : ("ETag: " + etag + "\r\n").c_str(),
-            last_modified ? ("Last-Modified: " + http_date(last_modified) + "\r\n").c_str() : "");
-    }
-
-    write(fd, hdr, hdr_len);
-    write(fd, response_body.data(), response_body.size());
+    if (!write_all(fd, hdr.data(), hdr.size())) return;
+    write_all(fd, out->data(), out->size());
 }
 
 static void send_status_response(int fd, int code, const char* status_text,
@@ -1472,8 +1504,10 @@ static void send_status_response(int fd, int code, const char* status_text,
         "Server: WebInfoMall/2.0\r\n"
         "\r\n",
         code, status_text, content_type.c_str(), body.size());
-    write(fd, hdr, hdr_len);
-    write(fd, body.data(), body.size());
+    if (hdr_len < 0) return;
+    if (hdr_len >= static_cast<int>(sizeof(hdr))) hdr_len = sizeof(hdr) - 1;
+    if (!write_all(fd, hdr, hdr_len)) return;
+    write_all(fd, body.data(), body.size());
 }
 
 static void send_304(int fd, const std::string& etag, bool keep_alive = false) {
@@ -1487,7 +1521,9 @@ static void send_304(int fd, const std::string& etag, bool keep_alive = false) {
         "\r\n",
         etag.c_str(),
         keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n");
-    write(fd, hdr, hdr_len);
+    if (hdr_len < 0) return;
+    if (hdr_len >= static_cast<int>(sizeof(hdr))) hdr_len = sizeof(hdr) - 1;
+    write_all(fd, hdr, hdr_len);
 }
 
 static void send_redirect(int fd, const std::string& location, bool keep_alive = false) {
@@ -1495,12 +1531,15 @@ static void send_redirect(int fd, const std::string& location, bool keep_alive =
     int hdr_len = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 302 Found\r\n"
         "Location: %s\r\n"
+        "Content-Length: 0\r\n"
         "%s"
         "Server: WebInfoMall/2.0\r\n"
         "\r\n",
         location.c_str(),
         keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n");
-    write(fd, hdr, hdr_len);
+    if (hdr_len < 0) return;
+    if (hdr_len >= static_cast<int>(sizeof(hdr))) hdr_len = sizeof(hdr) - 1;
+    write_all(fd, hdr, hdr_len);
 }
 
 // ── Topic / Hot Event Timeline ──────────────────────────────
@@ -1617,12 +1656,22 @@ static void handle_proxy(QueryEngine& qe, int csock, const std::string& url,
     }
     std::string ct = url_content_type(url);
     bool use_gzip = gzip_ok && ct.find("image/") != 0 && ct.find("font/") != 0;
-    send_response(csock, 200, ct, art.body, use_gzip, "", 0, keep_alive);
+    // Raw archived content is untrusted HTML from 1991–2017 crawls: serve it
+    // sandboxed so embedded <script> can't run in this site's origin, and
+    // forbid MIME sniffing.
+    std::string extra =
+        "Content-Security-Policy: sandbox\r\n"
+        "X-Content-Type-Options: nosniff\r\n";
+    send_response(csock, 200, ct, art.body, use_gzip, "", 0, keep_alive, extra);
 }
 
 // ── Request Handler ───────────────────────────────────────────
 
-// Returns true if the caller should keep the connection alive
+// Returns true if the caller should keep the connection alive.
+// Never closes csock — the worker loop owns the socket's lifetime, so a
+// return of false means "done with this connection", not "already closed".
+// (Closing here and again in the worker double-closed the fd, which could
+// tear down an unrelated connection that had reused the same fd number.)
 static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
     // Buffered read loop — read until we have complete headers
     std::string req_data;
@@ -1630,12 +1679,11 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
     while (req_data.find("\r\n\r\n") == std::string::npos) {
         if (req_data.size() >= MAX_REQUEST_SIZE) {
             LOG_WRN("Request too large (%zu bytes), closing", req_data.size());
-            close(csock);
             return false;
         }
         char tmp[BUF_READ_SIZE];
         ssize_t n = read(csock, tmp, sizeof(tmp));
-        if (n <= 0) { close(csock); return false; }
+        if (n <= 0) return false;
         req_data.append(tmp, n);
     }
 
@@ -1649,7 +1697,6 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
             LOG_WRN("Rate limit exceeded for %s", inet_ntoa(peer.sin_addr));
             send_status_response(csock, 429, "Too Many Requests",
                 "text/plain", "429 Too Many Requests\n");
-            close(csock);
             return false;
         }
     }
@@ -1670,7 +1717,6 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
         std::string etag = "\"home-" + std::to_string(total) + "\"";
         if (!req.etag_if_none_match.empty() && req.etag_if_none_match == etag) {
             send_304(csock, etag, wants_keepalive);
-            close(csock);
             goto done;
         }
         response = build_home(qe);
@@ -1682,7 +1728,6 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
             response = build_home(qe);
         } else if (q.find("http://") == 0 || q.find("https://") == 0) {
             send_redirect(csock, "/replay?url=" + url_encode(q), wants_keepalive);
-            close(csock);
             goto done;
         } else {
             response = build_search(qe, q);
@@ -1695,23 +1740,25 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
             response = build_home(qe);
             send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
         } else {
-            auto art = qe.get_page(url);
+            // Version selector from calendar/timeline links (0 = latest)
+            uint32_t req_date = static_cast<uint32_t>(
+                atoi(get_param(req.query, "date").c_str()));
+            auto art = qe.get_page(url, req_date);
             if (art.url.empty() || !art.valid) {
                 // Not found, or record exists but failed CRC/decompression.
                 // Either way the page cannot be served — treat as 404 ("record
                 // exists but is broken"). build_replay renders the right notice;
                 // never cache corrupt content.
-                response = build_replay(qe, url);
+                response = build_replay(qe, url, req_date);
                 code = 404;
                 send_response(csock, code, content_type, response, req.accepts_gzip, "", 0, wants_keepalive);
             } else {
                 std::string etag = make_etag(art.url, art.date);
                 if (!req.etag_if_none_match.empty() && req.etag_if_none_match == etag) {
                     send_304(csock, etag, wants_keepalive);
-                    close(csock);
                     goto done;
                 }
-                response = build_replay(qe, url);
+                response = build_replay(qe, url, req_date);
                 time_t lm = 0;
                 if (art.date >= 19910101) {
                     struct tm tm_val = {};
@@ -1729,7 +1776,6 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
         std::string q = get_param(req.query, "q");
         if (q.empty()) {
             send_redirect(csock, "/", wants_keepalive);
-            close(csock);
             goto done;
         }
         response = build_topic(qe, q);
@@ -1739,7 +1785,6 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
         std::string url = get_param(req.query, "url");
         if (url.empty()) {
             send_redirect(csock, "/", wants_keepalive);
-            close(csock);
             goto done;
         }
         handle_proxy(qe, csock, url, req.accepts_gzip, wants_keepalive);
@@ -1754,7 +1799,6 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
         std::string host = get_param(req.query, "h");
         if (host.empty()) {
             send_redirect(csock, "/", wants_keepalive);
-            close(csock);
             goto done;
         }
         response = build_host(qe, host);
@@ -1767,14 +1811,12 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
         } else {
             send_redirect(csock, "/replay?url=" + url_encode(url), wants_keepalive);
         }
-        close(csock);
         goto done;
     }
     else if (req.path == "/sitemap") {
         std::string host = get_param(req.query, "h");
         if (host.empty()) {
             send_redirect(csock, "/", wants_keepalive);
-            close(csock);
             goto done;
         }
         response = build_sitemap(qe, host);
@@ -1791,7 +1833,6 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter) {
         std::string b_str = get_param(req.query, "b");
         if (url.empty() || a_str.empty() || b_str.empty()) {
             send_redirect(csock, "/", wants_keepalive);
-            close(csock);
             goto done;
         }
         uint32_t da = static_cast<uint32_t>(atoi(a_str.c_str()));
@@ -1839,11 +1880,7 @@ done:
     LOG_INF("%s %s?%s -> %d (%.1fms)",
             req.method.c_str(), req.path.c_str(), req.query.c_str(), code, ms);
 
-    if (!wants_keepalive) {
-        close(csock);
-        return false;
-    }
-    return true; // keep connection alive
+    return wants_keepalive;
 }
 
 // ── Thread Pool ───────────────────────────────────────────────
@@ -1934,6 +1971,9 @@ static int run_server(QueryEngine& qe, int port) {
     // Register signal handlers for graceful shutdown
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+    // A client that disconnects mid-response would otherwise raise SIGPIPE
+    // on write() and kill the whole process.
+    signal(SIGPIPE, SIG_IGN);
 
     // Set accept timeout so we can poll the shutdown flag
     struct timeval tv = {ACCEPT_TIMEOUT_S, 0};

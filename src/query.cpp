@@ -45,15 +45,16 @@ MappedShard::~MappedShard() {
 // ── ArticleReader ──────────────────────────────────────────────
 
 ArticleReader::ArticleReader(const std::string& data_dir) : data_dir_(data_dir) {}
-ArticleReader::~ArticleReader() { for (auto& kv : open_files_) fclose(kv.second); }
+ArticleReader::~ArticleReader() { for (auto& kv : open_files_) ::close(kv.second); }
 
-FILE* ArticleReader::open_file(const std::string& rel_path) {
+int ArticleReader::open_file(const std::string& rel_path) {
+    std::lock_guard<std::mutex> lk(files_mtx_);
     auto it = open_files_.find(rel_path);
     if (it != open_files_.end()) return it->second;
     std::string full = data_dir_ + "/" + rel_path;
-    FILE* f = fopen(full.c_str(), "rb");
-    if (f) open_files_[rel_path] = f;
-    return f;
+    int fd = ::open(full.c_str(), O_RDONLY);
+    if (fd >= 0) open_files_[rel_path] = fd;
+    return fd;
 }
 
 ArticleReader::Article ArticleReader::read_article(
@@ -62,13 +63,31 @@ ArticleReader::Article ArticleReader::read_article(
     if (size < ArticleRecord::HEADER_SIZE) return art;
 
     std::vector<char> buf(size);
-    FILE* f = open_file(rel_path);
-    if (!f) return art;
-    fseeko(f, offset, SEEK_SET);
-    if (fread(buf.data(), 1, size, f) != size) return art;
+    int fd = open_file(rel_path);
+    if (fd < 0) return art;
+    // pread carries its own offset, so concurrent workers can share the fd.
+    ssize_t n = pread(fd, buf.data(), size, offset);
+    if (n != static_cast<ssize_t>(size)) return art;
 
     auto* rec = reinterpret_cast<const ArticleRecord*>(buf.data());
     if (rec->magic != ARTICLE_MAGIC) return art;
+
+    // The index stores record_size as uint16 — records >64KB arrive truncated.
+    // The on-disk header knows the real size; re-read the full record.
+    if (rec->record_size > size && rec->record_size <= 64u * 1024 * 1024) {
+        size = rec->record_size;
+        buf.resize(size);
+        if (pread(fd, buf.data(), size, offset) != static_cast<ssize_t>(size)) return art;
+        rec = reinterpret_cast<const ArticleRecord*>(buf.data());
+    }
+    // Bounds-check the variable-length sections against the buffer we hold,
+    // so corrupt length fields can't cause out-of-bounds reads below.
+    uint64_t need = static_cast<uint64_t>(ArticleRecord::HEADER_SIZE)
+                  + rec->url_len + rec->title_len + rec->body_compr_len;
+    if (rec->record_size > size || need > rec->record_size) {
+        art.valid = false;
+        return art;
+    }
 
     // Verify CRC-32 if present (non-zero means it was computed)
     if (rec->crc32 != 0) {
@@ -88,6 +107,12 @@ ArticleReader::Article ArticleReader::read_article(
 
     bool compressed = (rec->flags & 1);
     if (compressed && rec->body_compr_len > 0) {
+        // Cap the decompression buffer so a corrupt body_orig_len can't
+        // trigger a multi-GB allocation.
+        if (rec->body_orig_len > 256u * 1024 * 1024) {
+            art.valid = false;
+            return art;
+        }
         std::vector<char> decomp(rec->body_orig_len + 1);
         uLongf dest_len = rec->body_orig_len;
         int ret = ::uncompress(
@@ -112,10 +137,13 @@ ArticleReader::Article ArticleReader::read_article(
 
 // ── Query Engine ──────────────────────────────────────────────
 
-std::string QueryEngine::data_path(uint32_t crawl_date) {
+std::string QueryEngine::data_path(uint32_t crawl_date, uint32_t file_seq) {
+    // Legacy index entries carry reserved == 0; those predate multi-file
+    // months and always live in data_0001.dat.
+    if (file_seq == 0) file_seq = 1;
     char buf[128];
-    snprintf(buf, sizeof(buf), "%04u%02u/data_0001.dat",
-             crawl_date / 10000, (crawl_date / 100) % 100);
+    snprintf(buf, sizeof(buf), "%04u%02u/data_%04u.dat",
+             crawl_date / 10000, (crawl_date / 100) % 100, file_seq);
     return buf;
 }
 
@@ -197,7 +225,7 @@ std::string QueryEngine::get_entry_url(const UrlIndexEntry& ent, int sid) {
         return entry_url(ent, shard.url_pool, shard.header->url_pool_size);
     }
     // v1 fallback: read from data file
-    auto buf = reader_.read_article(data_path(ent.crawl_date),
+    auto buf = reader_.read_article(data_path(ent.crawl_date, ent.reserved),
                                      ent.file_offset, ent.record_size);
     return buf.url;
 }
@@ -236,7 +264,7 @@ ArticleReader::Article QueryEngine::get_page(const std::string& url, uint32_t da
     }
 
     auto& ent = block[best_idx];
-    return reader_.read_article(data_path(ent.crawl_date), ent.file_offset, ent.record_size);
+    return reader_.read_article(data_path(ent.crawl_date, ent.reserved), ent.file_offset, ent.record_size);
 }
 
 // ── Version listing ──────────────────────────────────────────
@@ -317,7 +345,7 @@ std::vector<QueryEngine::UrlWithDate> QueryEngine::get_host_urls(
             url = entry_url(ent, shard.url_pool, shard.header->url_pool_size);
         } else {
             // v1 fallback
-            url = reader_.read_article(data_path(ent.crawl_date),
+            url = reader_.read_article(data_path(ent.crawl_date, ent.reserved),
                                         ent.file_offset,
                                         std::min<uint32_t>(ent.record_size,
                                                  ArticleRecord::HEADER_SIZE + 1024u)).url;
@@ -356,7 +384,7 @@ std::vector<std::string> QueryEngine::search_prefix(const std::string& prefix, i
             for (uint32_t i = 0; i < shard.header->entry_count &&
                  urls.size() < static_cast<size_t>(limit); i++) {
                 auto& ent = shard.entries[i];
-                auto art = reader_.read_article(data_path(ent.crawl_date),
+                auto art = reader_.read_article(data_path(ent.crawl_date, ent.reserved),
                     ent.file_offset,
                     std::min<uint32_t>(ent.record_size, ArticleRecord::HEADER_SIZE + 1024u));
                 if (!art.url.empty() &&
@@ -447,7 +475,7 @@ std::string QueryEngine::get_random_url() {
     if (shard.is_v2 && shard.url_pool)
         return entry_url(ent, shard.url_pool, shard.header->url_pool_size);
     // v1 fallback
-    return reader_.read_article(data_path(ent.crawl_date),
+    return reader_.read_article(data_path(ent.crawl_date, ent.reserved),
         ent.file_offset, std::min<uint32_t>(ent.record_size,
             ArticleRecord::HEADER_SIZE + 1024u)).url;
 }
@@ -518,7 +546,7 @@ std::vector<std::string> QueryEngine::get_today_in_history_slow(uint32_t mmdd, i
                 if (shard.is_v2 && shard.url_pool)
                     url = entry_url(ent, shard.url_pool, shard.header->url_pool_size);
                 else {
-                    url = reader_.read_article(data_path(ent.crawl_date),
+                    url = reader_.read_article(data_path(ent.crawl_date, ent.reserved),
                         ent.file_offset, std::min<uint32_t>(ent.record_size,
                             ArticleRecord::HEADER_SIZE + 1024u)).url;
                 }
@@ -556,7 +584,7 @@ std::vector<QueryEngine::UrlWithDate> QueryEngine::get_by_date(uint32_t date, in
                 if (shard.is_v2 && shard.url_pool)
                     url = entry_url(ent, shard.url_pool, shard.header->url_pool_size);
                 else {
-                    url = reader_.read_article(data_path(ent.crawl_date),
+                    url = reader_.read_article(data_path(ent.crawl_date, ent.reserved),
                         ent.file_offset, std::min<uint32_t>(ent.record_size,
                             ArticleRecord::HEADER_SIZE + 1024u)).url;
                 }
@@ -590,7 +618,7 @@ ArticleReader::Article QueryEngine::get_page_by_date(const std::string& url, uin
     while (idx < hb->entry_count && block[idx].url_hash == hash) {
         if (block[idx].crawl_date == date) {
             auto& ent = block[idx];
-            return reader_.read_article(data_path(ent.crawl_date),
+            return reader_.read_article(data_path(ent.crawl_date, ent.reserved),
                 ent.file_offset, ent.record_size);
         }
         idx++;

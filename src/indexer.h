@@ -36,7 +36,7 @@ public:
     explicit IndexBuilderV2(const std::string& index_dir);
 
     void add_entry(const std::string& url, uint32_t crawl_date,
-                   int64_t offset, uint32_t record_size);
+                   int64_t offset, uint32_t record_size, uint32_t file_seq = 1);
 
     // Incremental merge: read existing v2 shard files back into the in-memory
     // accumulator so a subsequent build() rewrites old + new entries together

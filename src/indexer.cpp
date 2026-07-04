@@ -16,7 +16,7 @@ IndexBuilderV2::IndexBuilderV2(const std::string& index_dir) : index_dir_(index_
 }
 
 void IndexBuilderV2::add_entry(const std::string& url, uint32_t crawl_date,
-                                int64_t offset, uint32_t record_size) {
+                                int64_t offset, uint32_t record_size, uint32_t file_seq) {
     std::string host = extract_host(url);
     int sid = shard_for_host(host);
 
@@ -34,7 +34,9 @@ void IndexBuilderV2::add_entry(const std::string& url, uint32_t crawl_date,
     e.entry.record_size = static_cast<uint16_t>(record_size);
     e.entry.url_len = 0;       // filled in build_shard
     e.entry.url_offset = 0;    // filled in build_shard
-    e.entry.reserved = 0;
+    // reserved carries the data_NNNN.dat sequence so months that overflow the
+    // 2GB file cap stay readable (0 in legacy indexes ≙ seq 1).
+    e.entry.reserved = file_seq;
     e.host = host;
     e.url = url;
     shards_[sid].push_back(std::move(e));

@@ -314,7 +314,8 @@ int main(int argc, char** argv) {
                 }
 
                 // Add to index
-                indexer.add_entry(art.url, date, loc.offset, loc.size);
+                indexer.add_entry(art.url, date, loc.offset, loc.size,
+                                  static_cast<uint32_t>(loc.file_seq));
                 file_count++;
 
                 // Accumulate year distribution

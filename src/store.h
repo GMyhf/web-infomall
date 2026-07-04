@@ -29,6 +29,7 @@ public:
         std::string file_path;  // relative path within archive
         int64_t offset;         // byte offset within file
         uint32_t size;          // record size in bytes
+        int file_seq = 1;       // data_NNNN.dat sequence within the month
         bool ok = true;         // false if write failed
     };
 

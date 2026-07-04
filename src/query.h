@@ -52,7 +52,10 @@ struct MappedShard {
 
 class ArticleReader {
     std::string data_dir_;
-    std::unordered_map<std::string, FILE*> open_files_;
+    // fd cache + pread: multiple server workers read concurrently, so there is
+    // no shared file position to race on; the mutex only guards the map itself.
+    std::unordered_map<std::string, int> open_files_;
+    std::mutex files_mtx_;
 
 public:
     struct Article {
@@ -67,7 +70,7 @@ public:
     ~ArticleReader();
     ArticleReader(const ArticleReader&) = delete;
 
-    FILE* open_file(const std::string& rel_path);
+    int open_file(const std::string& rel_path);
     Article read_article(const std::string& rel_path, int64_t offset, uint32_t size);
 };
 
@@ -95,7 +98,7 @@ class QueryEngine {
     mutable std::mutex year_dist_mtx_;
     std::vector<TodayEntry> today_data_;
 
-    static std::string data_path(uint32_t crawl_date);
+    static std::string data_path(uint32_t crawl_date, uint32_t file_seq = 1);
     void load_year_dist();
     void load_today();
 

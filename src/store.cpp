@@ -95,6 +95,7 @@ DataStore::StoredRecord DataStore::write_article(
     loc.file_path = current_path_;
     loc.offset = current_size_;
     loc.size = record_size;
+    loc.file_seq = file_seq_;
 
     if (fwrite(buf.data(), 1, record_size, current_file_) != record_size) {
         fprintf(stderr, "ERROR: write failed for %s\n", current_path_.c_str());
