@@ -7,8 +7,7 @@
 FROM ubuntu:22.04 AS builder
 
 RUN apt-get update && apt-get install -y \
-    clang \
-    libc++-dev \
+    g++ \
     zlib1g-dev \
     make \
     && rm -rf /var/lib/apt/lists/*
@@ -17,13 +16,14 @@ COPY src/ /build/src/
 WORKDIR /build/src
 
 # Build load + serve binaries
-# On Linux, iconv is part of glibc, so -liconv is not needed
-RUN make CXX=clang++ CXX_STDLIB=/usr/include/c++/v1 LDFLAGS="-lz -lpthread"
+# On Linux, iconv is part of glibc, so -liconv is not needed.
+RUN make clean && make -j"$(nproc)" load serve
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────
 FROM ubuntu:22.04
 
 RUN apt-get update && apt-get install -y \
+    libstdc++6 \
     zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,7 +32,7 @@ COPY --from=builder /build/src/serve /usr/local/bin/serve
 
 EXPOSE 8088
 
-VOLUME ["/data"]
+VOLUME ["/archive"]
 
 ENTRYPOINT ["serve"]
-CMD ["/data", "/data/index", "8088"]
+CMD ["/archive/data", "/archive/index", "8088"]

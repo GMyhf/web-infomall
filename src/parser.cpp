@@ -1,20 +1,21 @@
 /*
- * parser.cpp — Parse TenMillionArticles format, convert GB2312 → UTF-8.
+ * parser.cpp — Parse TenMillionArticles format, convert GB18030-family text to UTF-8.
  *
- * Input:  id=\x1etime=\x1eurl=\x1etitle=\x1ebody=\x1f  (GB2312 encoding)
+ * Input:  id=\x1etime=\x1eurl=\x1etitle=\x1ebody=\x1f  (GB18030/GBK encoding)
  * Output: ArticleRecord stream (UTF-8, uncompressed)
  */
 
 #include "parser.h"
+#include <cerrno>
 
-// ── GB2312 → UTF-8 Converter ──────────────────────────────────
+// ── GB18030-family → UTF-8 Converter ──────────────────────────
 
 GbToUtf8::GbToUtf8() {
-    // GBK is superset of GB2312 — handles all common Chinese encodings
-    cd_ = iconv_open("UTF-8", "GBK");
+    // GB18030 is a strict superset of GBK/GB2312 and matches the occasional
+    // extended characters present in the retained sample data.
+    cd_ = iconv_open("UTF-8", "GB18030");
     if (cd_ == (iconv_t)-1) {
-        // Try GB18030 as fallback (even larger charset)
-        cd_ = iconv_open("UTF-8", "GB18030");
+        cd_ = iconv_open("UTF-8", "GBK");
     }
     if (cd_ == (iconv_t)-1) {
         cd_ = iconv_open("UTF-8", "GB2312"); // last resort
@@ -31,25 +32,51 @@ std::string GbToUtf8::convert(const char* data, size_t len) {
     // Reset iconv state for each conversion
     iconv(cd_, nullptr, nullptr, nullptr, nullptr);
 
-    std::string out;
-    out.resize(len * 3 + 1);
+    std::string out(len * 3 + 3, '\0');
     char* inbuf = const_cast<char*>(data);
     size_t inleft = len;
-    char* outbuf = &out[0];
+    char* outbuf = out.data();
     size_t outleft = out.size();
 
-    size_t ret = iconv(cd_, &inbuf, &inleft, &outbuf, &outleft);
-    if (ret == (size_t)-1) {
-        // Partial conversion might have succeeded — use what we got
-        size_t converted = out.size() - outleft;
-        if (converted > 0) {
-            out.resize(converted);
-            return out;
+    auto ensure_output = [&](size_t need) {
+        if (outleft >= need) return;
+        size_t used = static_cast<size_t>(outbuf - out.data());
+        out.resize(std::max(out.size() * 2, used + need));
+        outbuf = out.data() + used;
+        outleft = out.size() - used;
+    };
+
+    while (inleft > 0) {
+        size_t ret = iconv(cd_, &inbuf, &inleft, &outbuf, &outleft);
+        if (ret != static_cast<size_t>(-1)) break;
+
+        if (errno == E2BIG) {
+            ensure_output(4);
+            continue;
         }
-        // Complete failure — return as-is
-        return std::string(data, len);
+
+        // Preserve the remainder after malformed input instead of returning only
+        // the successfully converted prefix. U+FFFD keeps the output valid UTF-8.
+        int conversion_error = errno;
+        if (conversion_error == EILSEQ || conversion_error == EINVAL) {
+            ensure_output(3);
+            *outbuf++ = static_cast<char>(0xEF);
+            *outbuf++ = static_cast<char>(0xBF);
+            *outbuf++ = static_cast<char>(0xBD);
+            outleft -= 3;
+            if (conversion_error == EINVAL) {
+                inbuf += inleft;
+                inleft = 0;
+            } else {
+                inbuf++;
+                inleft--;
+            }
+            iconv(cd_, nullptr, nullptr, nullptr, nullptr);
+            continue;
+        }
+        break;
     }
-    out.resize(out.size() - outleft);
+    out.resize(static_cast<size_t>(outbuf - out.data()));
     return out;
 }
 

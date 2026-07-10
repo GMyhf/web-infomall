@@ -97,6 +97,11 @@ class QueryEngine {
     // since the server calls get_year_distribution() from multiple worker threads.
     mutable std::mutex year_dist_mtx_;
     std::vector<TodayEntry> today_data_;
+    bool stats_cached_ = false;
+    uint32_t total_articles_cached_ = 0;
+    uint32_t total_hosts_cached_ = 0;
+    uint32_t date_min_cached_ = 0;
+    uint32_t date_max_cached_ = 0;
 
     static std::string data_path(uint32_t crawl_date, uint32_t file_seq = 1);
     void load_year_dist();
@@ -110,6 +115,13 @@ public:
     struct Version {
         uint32_t date;
         int record_count;
+    };
+    struct HostSummary {
+        uint64_t record_count = 0;
+        uint64_t unique_url_count = 0;
+        uint32_t date_min = 0;
+        uint32_t date_max = 0;
+        std::map<uint32_t, uint64_t> year_counts;
     };
 
     QueryEngine(const std::string& data_dir, const std::string& index_dir);
@@ -128,6 +140,7 @@ public:
 
     // Host URL listing — reads URLs from mmap (v2)
     std::vector<UrlWithDate> get_host_urls(const std::string& host, int limit = 200);
+    HostSummary get_host_summary(const std::string& host);
 
     // URL prefix search — from mmap (v2), linear scan
     std::vector<std::string> search_prefix(const std::string& prefix, int limit = 100);

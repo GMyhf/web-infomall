@@ -11,22 +11,19 @@ Web InfoMall is a Wayback Machine-like historical web page replay system for Chi
 ### C++ system (Phase 2 v2 — production)
 
 ```bash
-cd src && make            # Build load + serve binaries (v2: threaded, gzip)
-cd src && make test       # Build and run parser smoke test (10 articles)
+make -C src               # Build load, serve, verify, and bench
+make -C src test          # Parser, core, loader checkpoint, and C++ HTTP regressions
 ```
 
-Requires: C++17 (clang++ or g++), zlib, iconv, pthread.
+Requires: C++17 (clang++ or g++), zlib, iconv, pthread, and Python 3 for tests.
 
-**macOS note**: If `clang++` can't find C++ stdlib headers (`cstdint` not found), the Makefile auto-detects the SDK path. If that fails, set it manually:
-```bash
-make CXX_STDLIB=/path/to/sdk/usr/include/c++/v1
-```
+On macOS the Makefile automatically adds the active SDK path when `xcrun` is available. Compiler and zlib paths remain overridable through `CXX`, `ZLIB_CFLAGS`, and `ZLIB_LIBS`.
 
 ### Data loading pipeline (C++)
 
 ```bash
-./src/load <dat_dir> <archive_dir> [--max N] [--files 0,1,2] [--all]
-./src/load /path/to/TenMillionArticles/dat ./archive --all   # Full 14M articles (~40 min)
+./src/load <dat_dir> <archive_dir> [--max N] [--files 0,1,2 | --all] [--incremental]
+./src/load /path/to/TenMillionArticles/dat ./archive --all   # Full dataset
 ```
 
 ### Start C++ replay server
@@ -42,6 +39,7 @@ The server now uses a **4-worker thread pool** and supports **gzip compression**
 ```bash
 python3 load_data.py                          # Load dat0 only (~118K articles)
 python3 server.py                             # http://localhost:5000
+python3 -m unittest test_parser.py
 python3 test_server.py
 ```
 
@@ -59,7 +57,7 @@ Both phases share the same data flow: **Parse → Store → Index → Query → 
 ### Data pipeline (C++)
 
 ```
-TenMillionArticles (.dat) → parser.cpp (GBK→UTF-8) → store.cpp (zlib compress, YYYYMM dirs)
+TenMillionArticles (.dat) → parser.cpp (GB18030→UTF-8) → store.cpp (zlib compress, YYYYMM dirs)
                                                               │
                           indexer.cpp (37-shard index with HostBlocks)
                                                               │
@@ -71,9 +69,9 @@ TenMillionArticles (.dat) → parser.cpp (GBK→UTF-8) → store.cpp (zlib compr
 ### Core data structures (`src/common.h`)
 
 - **`ArticleRecord`** — fixed 40-byte header + variable URL/title/body; body optionally zlib-compressed.
-- **`UrlIndexEntry`** — 28-byte index entry: `(url_hash, crawl_date, file_offset, record_size, url_len, url_offset, reserved)`. In v2 shards, the URL is at `url_pool + url_offset` — no data-file IO needed for search or host listing.
+- **`UrlIndexEntry`** — 28-byte index entry: `(url_hash, crawl_date, file_offset, record_size, url_len, url_offset, file_seq)`. The on-disk `reserved` field carries the `data_NNNN.dat` sequence; in v2 shards, the URL is at `url_pool + url_offset`.
 - **`HostBlock`** — 40-byte embedded index block per hostname (32-byte padded name + first_entry + entry_count). O(log H) binary search.
-- **`ShardFileHeader`** — v2 header with magic `0x49445821` (`"IDX!"`), entry_count, host_count, url_pool_size. Followed by HostBlock array, UrlIndexEntry array, and the URL string pool (concatenated null-terminated URLs).
+- **`ShardFileHeader`** — v2 header with magic `0x49445821` (`"IDX!"`), entry_count, host_count, url_pool_size. Followed by HostBlock array, UrlIndexEntry array, and a pool of concatenated URL byte slices.
 
 v1 shards (magic `0x49445820`, `"IDX "`) are still readable by the query engine via a fallback path that reads URLs from data files.
 
@@ -83,14 +81,14 @@ v1 shards (magic `0x49445820`, `"IDX "`) are still readable by the query engine 
 ShardFileHeader (16 bytes)
 HostBlock[host_count]          (40 bytes each, sorted by hostname)
 UrlIndexEntry[entry_count]     (28 bytes each, sorted by host+url_hash+date DESC)
-char url_pool[url_pool_size]   (concatenated URLs, each entry points via url_offset+url_len)
+char url_pool[url_pool_size]   (concatenated byte slices, each entry points via url_offset+url_len)
 ```
 
 ### Server (v2)
 
 - **4-worker thread pool** (`std::thread` + condition variable), replacing the old single-threaded accept loop.
 - **gzip compression**: Responses > 1KB are compressed if `Accept-Encoding: gzip` is present and savings ≥ 5%.
-- **Cache headers**: `ETag` (url_hash + date), `Last-Modified` (crawl date), `Cache-Control: public, max-age=86400`. Supports `If-None-Match` → `304 Not Modified`.
+- **Cache headers**: Strong `ETag` values include the rendered-content fingerprint and actual content-encoding variant; replay tags also include URL/date identity. `Last-Modified`, `Cache-Control`, weak/list `If-None-Match`, and `304 Not Modified` are supported.
 
 ### HTTP routes
 
@@ -99,8 +97,15 @@ char url_pool[url_pool_size]   (concatenated URLs, each entry points via url_off
 | `/` | Home page with stats and search |
 | `/search?q=<term>` | Search by URL prefix or host substring |
 | `/replay?url=<url>[&date=YYYYMMDD]` | Replay a specific archived page |
+| `/topic?q=<term>` | Search the title index for an event or topic |
+| `/proxy?url=<url>[&date=YYYYMMDD]` | Return sandboxed archived content with its inferred media type |
 | `/calendar?url=<url>` | Version history with CSS timeline |
 | `/host?h=<domain>` | Domain overview: stats, year chart, URL listing |
+| `/sitemap?h=<domain>` | URL path tree for a host |
+| `/browse?d=YYYYMMDD` | Browse pages captured on a date |
+| `/diff?url=<url>&a=<date>&b=<date>` | Paragraph-level comparison of two captures |
+| `/random` | Redirect to a random archived URL |
+| `/stats-page` | HTML archive statistics |
 | `/stats` | JSON API: total articles, hosts, date range |
 | `/ping` | Health check (plain text "pong") |
 
@@ -115,8 +120,8 @@ char url_pool[url_pool_size]   (concatenated URLs, each entry points via url_off
 
 - **mmap'd shard files** — zero-copy, OS-page-cached.
 - **Lookup flow**: URL → extract_host → `shard_for_host` → open shard → binary search HostBlock by hostname → binary search UrlIndexEntry by url_hash within host range.
-- **All lookups are O(log N)** with sub-millisecond latency for 14M articles.
-- Metadata cached in `meta.dat` for fast stats; falls back to scanning shard headers if missing.
+- Exact URL/host lookup is O(log N); prefix and host-substring search scan bounded result sets linearly.
+- Metadata is cached in `meta.dat`; missing/legacy metadata is recomputed by scanning every validated entry once at startup.
 
 ### Storage layout (`src/store.cpp`)
 
@@ -128,10 +133,11 @@ char url_pool[url_pool_size]   (concatenated URLs, each entry points via url_off
 
 | File | Role |
 |------|------|
-| `parser.py` | `ArticleParser` class — streaming `.dat` parser, GBK→UTF-8 using Python codecs |
+| `parser.py` | `ArticleParser` class — streaming `.dat` parser, GB18030→UTF-8 using Python codecs |
 | `store.py` | `ArchiveStore` class — SQLite storage with WAL mode, URL hash indexing, version tracking |
 | `server.py` | `ReplayHandler` — stdlib `HTTPServer`, routes: `/`, `/search`, `/replay`, `/calendar`, `/stats` |
 | `load_data.py` | Data loading pipeline using `ArticleParser` + `ArchiveStore` |
+| `test_parser.py` | Parser and multi-file loader regression tests |
 
 ### Templates directory
 
@@ -139,7 +145,7 @@ Jinja2-style templates (`templates/*.html`) for a potential Flask/Jinja2-based s
 
 ## RFC / encoding handling
 
-- Source data uses **GB2312/GBK** encoding. C++ parser uses `iconv` with fallback chain: GBK → GB18030 → GB2312. Python parser uses `'gb2312'` codec.
+- Source data uses the GB2312/GBK family. Both parsers prefer **GB18030** (a superset); C++ falls back to GBK and GB2312, replacing malformed sequences without truncating the remaining text.
 - Internally all text is **UTF-8**.
 - Record separators: `\x1e` (line), `\x1f` (record/article).
 
@@ -149,4 +155,4 @@ Jinja2-style templates (`templates/*.html`) for a potential Flask/Jinja2-based s
 - C++ server uses 4-worker thread pool; QueryEngine mmap is thread-safe (read-only).
 - SQLite uses WAL mode with 64MB cache for Phase 1 performance.
 - Shards target ~500K entries each for 14M total (fits in memory during index build).
-- v2 index embeds URLs inline (~80 bytes/entry avg); total index size ~400 MB for 14M articles (vs ~400 MB data files + index).
+- v2 index size scales with the 28-byte entry table plus the exact URL byte pool and host blocks.

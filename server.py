@@ -444,12 +444,13 @@ def main():
     # Inject store into handler class
     ReplayHandler.store = store
 
-    server = HTTPServer(('0.0.0.0', args.port), ReplayHandler)
+    httpd = HTTPServer(('0.0.0.0', args.port), ReplayHandler)
     try:
-        server.serve_forever()
+        httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down.")
-        server.shutdown()
+    finally:
+        httpd.server_close()
         store.close()
 
 

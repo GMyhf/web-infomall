@@ -7,7 +7,7 @@ Phase 2: Load all 14M+ articles from all dat files.
 Usage:
     python3 load_data.py                  # Phase 1: load dat0 only (~118K articles)
     python3 load_data.py --all            # Phase 2: load all files
-    python3 load_data.py --files dat0,dat1,dat2  # Load specific files
+    python3 load_data.py --files 0,1,2     # Load specific files
     python3 load_data.py --max 10000      # Load at most 10K articles from dat0
 
 NOTE: This is Phase 1 (Python prototype). For production, use the
@@ -44,13 +44,17 @@ def format_duration(seconds: float) -> str:
         return f"{h}h{m}m"
 
 
-def load_files(file_indices: list[int], store: ArchiveStore, max_per_file: int = None):
+def load_files(file_indices: list[int], store: ArchiveStore, max_total: int = None):
     """Load articles from specified .dat files into the store."""
     parser = ArticleParser()
     total = 0
     total_errors = 0
 
     for idx in file_indices:
+        remaining = max_total - total if max_total else None
+        if remaining is not None and remaining <= 0:
+            break
+
         filepath = os.path.join(DATA_DIR, f'dat{idx}')
         if not os.path.exists(filepath):
             print(f"  [SKIP] {filepath} not found")
@@ -63,8 +67,9 @@ def load_files(file_indices: list[int], store: ArchiveStore, max_per_file: int =
         count = 0
         batch = []
         batch_size = 5000
+        errors_before = len(parser.errors)
 
-        for article in parser.parse_file(filepath, max_articles=max_per_file):
+        for article in parser.parse_file(filepath, max_articles=remaining):
             batch.append((
                 article.url,
                 article.time,
@@ -76,9 +81,6 @@ def load_files(file_indices: list[int], store: ArchiveStore, max_per_file: int =
                 count += len(batch)
                 batch.clear()
 
-            if max_per_file and count >= max_per_file:
-                break
-
         # Insert remaining
         if batch:
             store.insert_batch(batch, source_file=f'dat{idx}')
@@ -87,12 +89,13 @@ def load_files(file_indices: list[int], store: ArchiveStore, max_per_file: int =
         elapsed = time.time() - t0
         rate = count / elapsed if elapsed > 0 else 0
         total += count
-        total_errors += len(parser.errors)
+        file_errors = len(parser.errors) - errors_before
+        total_errors += file_errors
 
-        status = "✓" if parser.errors == [] else f"⚠ ({len(parser.errors)} errors)"
+        status = "✓" if file_errors == 0 else f"⚠ ({file_errors} errors)"
         print(f"{status} {count} articles in {format_duration(elapsed)} ({rate:.0f} rec/s)")
 
-        if max_per_file and total >= max_per_file:
+        if max_total and total >= max_total:
             break
 
     return total, total_errors
@@ -105,6 +108,8 @@ def main():
     ap.add_argument('--max', type=int, default=0, help='Max articles to load total')
     ap.add_argument('--db', type=str, default=DB_PATH, help='SQLite database path')
     args = ap.parse_args()
+    if args.max < 0:
+        ap.error('--max must be non-negative')
 
     store = ArchiveStore(args.db)
 
@@ -122,7 +127,7 @@ def main():
     print()
 
     t_start = time.time()
-    total, errors = load_files(file_indices, store, max_per_file=args.max)
+    total, errors = load_files(file_indices, store, max_total=args.max)
     t_total = time.time() - t_start
 
     print()

@@ -34,6 +34,7 @@
 #include <sys/mman.h>
 #include <cerrno>
 #include <utility>
+#include <set>
 
 // ── Statistics ─────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ struct VerifyStats {
     uint64_t structural_errors = 0;
     uint64_t bad_entry_refs = 0;
     uint64_t good_entry_refs = 0;
+    uint64_t unreferenced_data_records = 0;
     uint64_t shards_checked = 0;
     uint64_t shard_errors = 0;
     uint64_t data_files_scanned = 0;
@@ -53,7 +55,7 @@ struct VerifyStats {
 
     void print() const {
         uint64_t total_issues = structural_errors + crc32_mismatch
-                              + bad_entry_refs + shard_errors;
+                              + bad_entry_refs + unreferenced_data_records + shard_errors;
 
         printf("\n=== Verification Summary ===\n");
         printf("Shards checked:        %llu",
@@ -77,6 +79,8 @@ struct VerifyStats {
                (unsigned long long)good_entry_refs);
         printf("Cross-ref bad:         %llu\n",
                (unsigned long long)bad_entry_refs);
+        printf("Unreferenced records:  %llu\n",
+               (unsigned long long)unreferenced_data_records);
         printf("Missing data files:    %llu\n",
                (unsigned long long)missing_data_files);
         printf("Structural errors:     %llu\n",
@@ -159,105 +163,65 @@ static std::string month_from_data_path(const std::string& path) {
     return path.substr(prev + 1, 6);
 }
 
+static int sequence_from_data_path(const std::string& path) {
+    size_t slash = path.rfind('/');
+    const char* name = slash == std::string::npos ? path.c_str() : path.c_str() + slash + 1;
+    int sequence = 0;
+    char trailing = 0;
+    return sscanf(name, "data_%d.dat%c", &sequence, &trailing) == 1 && sequence > 0
+        ? sequence : 0;
+}
+
+static std::string data_file_key(const std::string& month, uint32_t sequence) {
+    return month + "/" + std::to_string(sequence == 0 ? 1 : sequence);
+}
+
 // ── Shard Structure Verification ───────────────────────────────
 
 static bool verify_shard_structure(const std::string& path, VerifyStats& stats) {
-    int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "ERROR: Cannot open %s: %s\n",
-                path.c_str(), strerror(errno));
+    MappedShard shard;
+    if (!shard.open(path.c_str())) {
+        fprintf(stderr, "ERROR: Invalid or truncated shard %s\n", path.c_str());
         stats.shard_errors++;
         return false;
     }
-
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        fprintf(stderr, "ERROR: Cannot stat %s: %s\n",
-                path.c_str(), strerror(errno));
-        close(fd);
-        stats.shard_errors++;
-        return false;
-    }
-
-    if (st.st_size < (off_t)sizeof(ShardFileHeader)) {
-        fprintf(stderr, "ERROR: %s is too small (%lld bytes, need >= %zu)\n",
-                path.c_str(), (long long)st.st_size, sizeof(ShardFileHeader));
-        close(fd);
-        stats.shard_errors++;
-        return false;
-    }
-
-    void* data = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-    if (data == MAP_FAILED) {
-        fprintf(stderr, "ERROR: Cannot mmap %s: %s\n",
-                path.c_str(), strerror(errno));
-        close(fd);
-        stats.shard_errors++;
-        return false;
-    }
-
-    const auto* hdr = static_cast<const ShardFileHeader*>(data);
-    bool ok = true;
-
-    // Verify magic number
-    bool is_v2 = (hdr->magic == SHARD_MAGIC);
-    bool is_v1 = (hdr->magic == SHARD_MAGIC_V1);
-    if (!is_v2 && !is_v1) {
-        fprintf(stderr, "ERROR: %s has invalid magic 0x%08x "
-                "(expected 0x%08x or 0x%08x)\n",
-                path.c_str(), hdr->magic, SHARD_MAGIC, SHARD_MAGIC_V1);
-        stats.shard_errors++;
-        ok = false;
-    }
-
-    // Verify consistency of header fields
-    uint64_t expected_size = sizeof(ShardFileHeader)
-        + (uint64_t)hdr->host_count * sizeof(HostBlock)
-        + (uint64_t)hdr->entry_count * sizeof(UrlIndexEntry)
-        + (uint64_t)hdr->url_pool_size;
-
-    if (expected_size != (uint64_t)st.st_size) {
-        fprintf(stderr, "ERROR: %s size mismatch: header says %llu bytes, "
-                "file is %lld bytes\n",
-                path.c_str(),
-                (unsigned long long)expected_size,
-                (long long)st.st_size);
-        stats.structural_errors++;
-        ok = false;
-    }
-
-    // For v2, url_pool_size should be > 0 if entries exist
-    if (is_v2 && hdr->entry_count > 0 && hdr->url_pool_size == 0) {
-        fprintf(stderr, "WARNING: %s is v2 with %u entries but url_pool_size = 0\n",
-                path.c_str(), hdr->entry_count);
-        // This is unusual but not necessarily an error (URLs could all be empty)
-    }
-
-    if (ok) {
-        stats.shards_checked++;
-    }
-
-    munmap(data, (size_t)st.st_size);
-    close(fd);
-    return ok;
+    stats.shards_checked++;
+    return true;
 }
 
-// ── Data Record Position Set (per month) ──────────────────────
+// ── Data Record Position Set (per data file) ──────────────────
 //
-// Stores (offset, record_size) pairs for all data files in a month.
+// Stores enough record identity to prove an index entry points at the intended
+// article, rather than merely at some record with the same offset and size.
 // Used for O(log N) cross-referencing of index entries against
 // data file records.
 //
-// Because the index entry does not store the data file sequence
-// number (only the YYYYMM from crawl_date), we collect offsets
-// from all data files within a month. Duplicate offsets across
-// files (extremely rare) are retained and searched linearly.
+// UrlIndexEntry::reserved stores the sequence (legacy 0 means file 1), so
+// collapsing all monthly files would allow a wrong sequence to pass by chance.
 
 struct MonthRecordSet {
-    std::vector<std::pair<uint32_t, uint16_t>> records;
+    struct RecordRef {
+        uint32_t offset;
+        uint32_t crawl_date;
+        uint32_t mini_hash;
+        uint16_t record_size;
+        bool referenced = false;
 
-    void add(uint32_t offset, uint16_t size) {
-        records.emplace_back(offset, size);
+        bool operator<(const RecordRef& other) const {
+            if (offset != other.offset) return offset < other.offset;
+            if (crawl_date != other.crawl_date) return crawl_date < other.crawl_date;
+            if (mini_hash != other.mini_hash) return mini_hash < other.mini_hash;
+            return record_size < other.record_size;
+        }
+        bool operator==(const RecordRef& other) const {
+            return offset == other.offset && crawl_date == other.crawl_date &&
+                   mini_hash == other.mini_hash && record_size == other.record_size;
+        }
+    };
+    std::vector<RecordRef> records;
+
+    void add(uint32_t offset, uint16_t size, uint32_t date, uint32_t hash) {
+        records.push_back({offset, date, hash, size, false});
     }
 
     void sort_and_dedup() {
@@ -269,13 +233,18 @@ struct MonthRecordSet {
         records.erase(last, records.end());
     }
 
-    // Check if this month has a record at the given offset with
-    // the given record size.
-    bool has_match(uint32_t offset, uint16_t size) const {
-        auto it = std::lower_bound(records.begin(), records.end(),
-                                   std::make_pair(offset, uint16_t(0)));
-        while (it != records.end() && it->first == offset) {
-            if (it->second == size) return true;
+    bool mark_match(uint32_t offset, uint16_t size, uint32_t date,
+                    uint32_t hash) {
+        auto it = std::lower_bound(records.begin(), records.end(), offset,
+            [](const RecordRef& record, uint32_t wanted_offset) {
+                return record.offset < wanted_offset;
+            });
+        while (it != records.end() && it->offset == offset) {
+            if (it->record_size == size && it->crawl_date == date &&
+                it->mini_hash == hash) {
+                it->referenced = true;
+                return true;
+            }
             ++it;
         }
         return false;
@@ -286,7 +255,7 @@ struct MonthRecordSet {
 
 static void scan_data_file(const std::string& path,
                             VerifyStats& stats,
-                            std::unordered_map<std::string, MonthRecordSet>& month_sets)
+                            std::unordered_map<std::string, MonthRecordSet>& file_sets)
 {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) {
@@ -307,7 +276,14 @@ static void scan_data_file(const std::string& path,
 
     stats.data_files_scanned++;
     std::string month = month_from_data_path(path);
-    MonthRecordSet& mset = month_sets[month];
+    int sequence = sequence_from_data_path(path);
+    if (month.size() != 6 || sequence <= 0) {
+        fprintf(stderr, "ERROR: Invalid data file path %s\n", path.c_str());
+        stats.structural_errors++;
+        fclose(f);
+        return;
+    }
+    MonthRecordSet& mset = file_sets[data_file_key(month, static_cast<uint32_t>(sequence))];
 
     // Reusable buffer for full-record reads
     std::vector<char> buf;
@@ -333,9 +309,19 @@ static void scan_data_file(const std::string& path,
         }
 
         // Sanity-check record_size
-        if (hdr.record_size < ArticleRecord::HEADER_SIZE) {
+        if (hdr.record_size < ArticleRecord::HEADER_SIZE || hdr.record_size > MAX_RECORD_SIZE) {
             fprintf(stderr, "ERROR: Record size %u < header size at offset %lld in %s\n",
                     hdr.record_size, (long long)offset, path.c_str());
+            stats.structural_errors++;
+            break;
+        }
+
+        uint64_t payload_size = static_cast<uint64_t>(ArticleRecord::HEADER_SIZE)
+            + hdr.url_len + hdr.title_len + hdr.body_compr_len;
+        if (payload_size != hdr.record_size || !valid_crawl_date(hdr.crawl_date) ||
+            offset > UINT32_MAX) {
+            fprintf(stderr, "ERROR: Invalid record fields at offset %lld in %s\n",
+                    (long long)offset, path.c_str());
             stats.structural_errors++;
             break;
         }
@@ -347,13 +333,11 @@ static void scan_data_file(const std::string& path,
             break;
         }
 
-        // Record this position for cross-referencing
-        mset.add(static_cast<uint32_t>(offset),
-                 static_cast<uint16_t>(hdr.record_size));
-        stats.total_data_records++;
-
-        // Read the full record (or skip body if no CRC32)
+        // Read enough of every record to verify the URL fingerprint. CRC-enabled
+        // records already require the entire payload; legacy records only need
+        // the URL bytes and can seek over the remainder.
         bool has_crc = (hdr.crc32 != 0);
+        std::string record_url;
 
         if (has_crc) {
             // Read full record into buffer for CRC32 verification
@@ -381,10 +365,18 @@ static void scan_data_file(const std::string& path,
                         (long long)offset, path.c_str(), hdr.crc32, computed);
                 stats.crc32_mismatch++;
             }
+            record_url.assign(buf.data() + ArticleRecord::HEADER_SIZE, hdr.url_len);
         } else {
-            // No CRC32 — skip past the body
-            if (hdr.record_size > sizeof(hdr)) {
-                if (fseeko(f, hdr.record_size - sizeof(hdr), SEEK_CUR) != 0) {
+            record_url.resize(hdr.url_len);
+            if (hdr.url_len && fread(record_url.data(), 1, hdr.url_len, f) != hdr.url_len) {
+                fprintf(stderr, "ERROR: Short URL read at offset %lld in %s\n",
+                        (long long)offset, path.c_str());
+                stats.structural_errors++;
+                break;
+            }
+            uint32_t remaining = hdr.record_size - sizeof(hdr) - hdr.url_len;
+            if (remaining > 0) {
+                if (fseeko(f, remaining, SEEK_CUR) != 0) {
                     fprintf(stderr, "ERROR: Seek error at offset %lld in %s\n",
                             (long long)offset, path.c_str());
                     stats.structural_errors++;
@@ -392,6 +384,17 @@ static void scan_data_file(const std::string& path,
                 }
             }
         }
+
+        uint32_t actual_mini_hash = mini_hash(record_url);
+        if (!valid_archive_url(record_url) || hdr.mini_hash != actual_mini_hash) {
+            fprintf(stderr, "ERROR: Invalid URL fingerprint at offset %lld in %s\n",
+                    (long long)offset, path.c_str());
+            stats.structural_errors++;
+        }
+        mset.add(static_cast<uint32_t>(offset),
+                 static_cast<uint16_t>(hdr.record_size), hdr.crawl_date,
+                 actual_mini_hash);
+        stats.total_data_records++;
 
         offset += hdr.record_size;
     }
@@ -402,81 +405,63 @@ static void scan_data_file(const std::string& path,
 // ── Cross-Reference Index Entries Against Data Records ────────
 
 static void crossref_shard(const std::string& path,
-                            const std::string& data_dir,
                             VerifyStats& stats,
-                            const std::unordered_map<std::string, MonthRecordSet>& month_sets)
+                            std::unordered_map<std::string, MonthRecordSet>& file_sets)
 {
-    int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "WARNING: Cannot open %s for cross-reference: %s\n",
-                path.c_str(), strerror(errno));
-        stats.shard_errors++;
-        return;
-    }
-
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        close(fd);
-        stats.shard_errors++;
-        return;
-    }
-
-    void* data = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-    if (data == MAP_FAILED) {
-        close(fd);
-        stats.shard_errors++;
-        return;
-    }
-
-    const auto* hdr = static_cast<const ShardFileHeader*>(data);
-    const auto* hosts = reinterpret_cast<const HostBlock*>(hdr + 1);
-    const auto* entries = reinterpret_cast<const UrlIndexEntry*>(hosts + hdr->host_count);
+    MappedShard shard;
+    if (!shard.open(path.c_str())) return;
+    const ShardFileHeader* hdr = shard.header;
+    const UrlIndexEntry* entries = shard.entries;
 
     stats.total_index_entries += hdr->entry_count;
 
-    char month_buf[7];
+    char month_buf[16];
     for (uint32_t i = 0; i < hdr->entry_count; i++) {
         const auto& e = entries[i];
 
         // Build YYYYMM from crawl_date
+        if (!valid_crawl_date(e.crawl_date)) {
+            fprintf(stderr, "WARNING: Entry [%u] has invalid crawl date %u in %s\n",
+                    i, e.crawl_date, path.c_str());
+            stats.bad_entry_refs++;
+            continue;
+        }
         snprintf(month_buf, sizeof(month_buf), "%04u%02u",
                  e.crawl_date / 10000, (e.crawl_date / 100) % 100);
         std::string month(month_buf, 6);
+        uint32_t sequence = e.reserved == 0 ? 1 : e.reserved;
+        std::string key = data_file_key(month, sequence);
 
-        auto mit = month_sets.find(month);
-        if (mit == month_sets.end()) {
-            // Check if month directory exists at all
-            std::string month_dir = data_dir + "/" + month;
-            if (is_directory(month_dir)) {
-                // Month directory exists but has no records — possibly empty
-                fprintf(stderr, "WARNING: Entry [%u] points to month %s "
-                        "which has no scanned data records\n",
-                        i, month.c_str());
-            } else {
-                // Month directory does not exist
-                stats.missing_data_files++;
-            }
-            fprintf(stderr, "WARNING: Entry offset=%u size=%u date=%u "
-                    "in %s: month %s not found\n",
+        auto fit = file_sets.find(key);
+        if (fit == file_sets.end()) {
+            stats.missing_data_files++;
+            fprintf(stderr, "WARNING: Entry offset=%u size=%u date=%u seq=%u "
+                    "in %s: data file not found\n",
                     e.file_offset, e.record_size, e.crawl_date,
-                    path.c_str(), month.c_str());
+                    sequence, path.c_str());
             stats.bad_entry_refs++;
             continue;
         }
 
-        if (mit->second.has_match(e.file_offset, e.record_size)) {
+        uint32_t entry_mini_hash = static_cast<uint32_t>(e.url_hash) ^
+                                   static_cast<uint32_t>(e.url_hash >> 32);
+        bool index_url_ok = true;
+        if (shard.is_v2) {
+            std::string indexed_url = entry_url(e, shard.url_pool, hdr->url_pool_size);
+            index_url_ok = valid_archive_url(indexed_url) &&
+                           url_hash(indexed_url) == e.url_hash;
+        }
+        if (index_url_ok && fit->second.mark_match(
+                e.file_offset, e.record_size, e.crawl_date, entry_mini_hash)) {
             stats.good_entry_refs++;
         } else {
-            fprintf(stderr, "WARNING: Entry offset=%u size=%u in %s: "
-                    "no matching record at offset in month %s\n",
-                    e.file_offset, e.record_size,
-                    path.c_str(), month.c_str());
+            fprintf(stderr, "WARNING: Entry offset=%u size=%u date=%u in %s: "
+                    "record identity mismatch in %s/data_%04u.dat\n",
+                    e.file_offset, e.record_size, e.crawl_date,
+                    path.c_str(), month.c_str(), sequence);
             stats.bad_entry_refs++;
         }
     }
-
-    munmap(data, (size_t)st.st_size);
-    close(fd);
 }
 
 // ── Main ──────────────────────────────────────────────────────
@@ -519,14 +504,16 @@ int main(int argc, char** argv) {
     printf("=== Phase 1: Shard Structure Verification ===\n");
 
     int shards_found = 0;
+    bool valid_shards[NUM_SHARDS] = {};
     for (int i = 0; i < NUM_SHARDS; i++) {
-        char path[256];
-        snprintf(path, sizeof(path), "%s/url_%02d.idx", index_dir.c_str(), i);
+        char leaf[32];
+        snprintf(leaf, sizeof(leaf), "/url_%02d.idx", i);
+        std::string path = index_dir + leaf;
         if (!is_regular_file(path)) {
             continue;  // missing shard is normal (no entries for its hosts)
         }
         shards_found++;
-        verify_shard_structure(path, stats);
+        valid_shards[i] = verify_shard_structure(path, stats);
     }
 
     printf("  Found %d/%d shard files, %llu verified OK\n\n",
@@ -547,9 +534,9 @@ int main(int argc, char** argv) {
     auto data_files = discover_data_files(data_dir);
     printf("  Found %zu data files\n", data_files.size());
 
-    std::unordered_map<std::string, MonthRecordSet> month_sets;
+    std::unordered_map<std::string, MonthRecordSet> file_sets;
     for (const auto& df : data_files) {
-        scan_data_file(df, stats, month_sets);
+        scan_data_file(df, stats, file_sets);
     }
 
     printf("  Files scanned:  %llu\n",
@@ -566,10 +553,12 @@ int main(int argc, char** argv) {
     }
 
     // Sort month record sets for binary search
-    for (auto& [month, mset] : month_sets) {
+    std::set<std::string> months;
+    for (auto& [key, mset] : file_sets) {
         mset.sort_and_dedup();
+        months.insert(key.substr(0, 6));
     }
-    printf("  Months covered: %zu\n\n", month_sets.size());
+    printf("  Months covered: %zu\n\n", months.size());
 
     // ──────────────────────────────────────────────────────────
     // Phase 3: Cross-Reference — check every index entry
@@ -577,10 +566,17 @@ int main(int argc, char** argv) {
     printf("=== Phase 3: Cross-Reference ===\n");
 
     for (int i = 0; i < NUM_SHARDS; i++) {
-        char path[256];
-        snprintf(path, sizeof(path), "%s/url_%02d.idx", index_dir.c_str(), i);
-        if (!is_regular_file(path)) continue;
-        crossref_shard(path, data_dir, stats, month_sets);
+        if (!valid_shards[i]) continue;
+        char leaf[32];
+        snprintf(leaf, sizeof(leaf), "/url_%02d.idx", i);
+        crossref_shard(index_dir + leaf, stats, file_sets);
+    }
+
+    for (const auto& [key, records] : file_sets) {
+        (void)key;
+        for (const auto& record : records.records) {
+            if (!record.referenced) stats.unreferenced_data_records++;
+        }
     }
 
     printf("  Entries checked: %llu\n",
@@ -589,6 +585,8 @@ int main(int argc, char** argv) {
            (unsigned long long)stats.good_entry_refs);
     printf("  Bad refs:        %llu\n",
            (unsigned long long)stats.bad_entry_refs);
+    printf("  Unreferenced:    %llu\n",
+           (unsigned long long)stats.unreferenced_data_records);
 
     // ──────────────────────────────────────────────────────────
     // Report
@@ -598,5 +596,6 @@ int main(int argc, char** argv) {
     return (stats.structural_errors > 0 ||
             stats.crc32_mismatch > 0 ||
             stats.bad_entry_refs > 0 ||
+            stats.unreferenced_data_records > 0 ||
             stats.shard_errors > 0) ? 1 : 0;
 }

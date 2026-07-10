@@ -59,8 +59,9 @@ def _url_hash(url: str) -> str:
 
 
 def _date_to_timestamp(date_str: str) -> int:
-    """Convert YYYYMMDD to unix timestamp (noon UTC)."""
+    """Convert YYYYMMDD or YYYY-MM-DD to a noon timestamp."""
     try:
+        date_str = date_str.replace('-', '')
         if len(date_str) == 8:
             dt = datetime(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]), 12, 0, 0)
             return int(dt.timestamp())

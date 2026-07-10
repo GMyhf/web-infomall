@@ -10,14 +10,22 @@
 
 #include "indexer.h"
 #include <cstring>
+#include <cerrno>
+#include <unistd.h>
 
-IndexBuilderV2::IndexBuilderV2(const std::string& index_dir) : index_dir_(index_dir) {
-    for (auto& s : shards_) s.reserve(600000); // ~600K per shard for 14M total
-}
+IndexBuilderV2::IndexBuilderV2(const std::string& index_dir) : index_dir_(index_dir) {}
 
 void IndexBuilderV2::add_entry(const std::string& url, uint32_t crawl_date,
                                 int64_t offset, uint32_t record_size, uint32_t file_seq) {
+    if (!valid_archive_url(url) || !valid_crawl_date(crawl_date) ||
+        record_size < ArticleRecord::HEADER_SIZE || record_size > MAX_RECORD_SIZE ||
+        file_seq == 0) {
+        fprintf(stderr, "WARN: invalid index entry skipped (url_len=%zu date=%u size=%u seq=%u)\n",
+                url.size(), crawl_date, record_size, file_seq);
+        return;
+    }
     std::string host = extract_host(url);
+    if (host.empty()) return;
     int sid = shard_for_host(host);
 
     EntryWithHost e;
@@ -42,60 +50,97 @@ void IndexBuilderV2::add_entry(const std::string& url, uint32_t crawl_date,
     shards_[sid].push_back(std::move(e));
 }
 
-void IndexBuilderV2::load_existing() {
+bool IndexBuilderV2::load_existing() {
     size_t loaded = 0;
+    bool ok = true;
     for (int sid = 0; sid < NUM_SHARDS; sid++) {
-        char fname[64];
-        snprintf(fname, sizeof(fname), "%s/url_%02d.idx", index_dir_.c_str(), sid);
-        FILE* f = fopen(fname, "rb");
+        char leaf[32];
+        snprintf(leaf, sizeof(leaf), "/url_%02d.idx", sid);
+        std::string fname = index_dir_ + leaf;
+        FILE* f = fopen(fname.c_str(), "rb");
         if (!f) continue;
 
         ShardFileHeader hdr;
-        if (fread(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); continue; }
+        if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
+            fprintf(stderr, "ERROR: Cannot read existing shard %d\n", sid);
+            ok = false;
+            fclose(f);
+            continue;
+        }
         // Only v2 shards embed the URL pool; v1 cannot be reconstructed without
         // touching the data files, so we refuse to merge it (would lose URLs).
         if (hdr.magic != SHARD_MAGIC) {
-            fprintf(stderr, "WARN: shard %d magic 0x%08x is not v2; cannot merge — "
-                            "existing entries in this shard will be lost\n", sid, hdr.magic);
+            fprintf(stderr, "ERROR: shard %d magic 0x%08x is not v2; incremental merge refused\n",
+                    sid, hdr.magic);
+            ok = false;
+            fclose(f);
+            continue;
+        }
+
+        if (fseeko(f, 0, SEEK_END) != 0) { ok = false; fclose(f); continue; }
+        off_t file_size = ftello(f);
+        uint64_t expected_size = sizeof(ShardFileHeader)
+            + static_cast<uint64_t>(hdr.host_count) * sizeof(HostBlock)
+            + static_cast<uint64_t>(hdr.entry_count) * sizeof(UrlIndexEntry)
+            + hdr.url_pool_size;
+        if (file_size < 0 || expected_size != static_cast<uint64_t>(file_size) ||
+            (hdr.entry_count > 0 && hdr.url_pool_size == 0) ||
+            fseeko(f, sizeof(ShardFileHeader), SEEK_SET) != 0) {
+            fprintf(stderr, "WARN: shard %d has an invalid layout; refusing incremental merge\n", sid);
+            ok = false;
             fclose(f);
             continue;
         }
 
         // Skip the HostBlock array (rebuilt from scratch in build_shard).
         if (fseek(f, static_cast<long>(hdr.host_count) * sizeof(HostBlock), SEEK_CUR) != 0) {
-            fclose(f); continue;
+            ok = false; fclose(f); continue;
         }
         std::vector<UrlIndexEntry> ents(hdr.entry_count);
         if (hdr.entry_count &&
             fread(ents.data(), sizeof(UrlIndexEntry), hdr.entry_count, f) != hdr.entry_count) {
-            fclose(f); continue;
+            ok = false; fclose(f); continue;
         }
         std::vector<char> pool(hdr.url_pool_size);
         if (hdr.url_pool_size &&
             fread(pool.data(), 1, hdr.url_pool_size, f) != hdr.url_pool_size) {
-            fclose(f); continue;
+            ok = false; fclose(f); continue;
         }
         fclose(f);
 
         auto& vec = shards_[sid];
         vec.reserve(vec.size() + hdr.entry_count);
         for (auto& e : ents) {
-            if (!entry_in_pool(e, hdr.url_pool_size)) continue;  // skip corrupt slice
+            if (!entry_in_pool(e, hdr.url_pool_size) || e.url_len == 0 ||
+                e.url_len > MAX_URL_LEN) { ok = false; continue; }
             EntryWithHost ewh;
             ewh.entry = e;
             ewh.entry.url_offset = 0;   // recomputed in build_shard
             ewh.entry.url_len = 0;
             ewh.url.assign(pool.data() + e.url_offset, e.url_len);
             ewh.host = extract_host(ewh.url);
+            if (!valid_archive_url(ewh.url) || !valid_crawl_date(e.crawl_date) ||
+                e.url_hash != url_hash(ewh.url) ||
+                ewh.host.empty() || shard_for_host(ewh.host) != sid) {
+                ok = false;
+                continue;
+            }
             vec.push_back(std::move(ewh));
             loaded++;
         }
     }
     printf("Merged %zu existing index entries\n", loaded);
+    return ok;
 }
 
 bool IndexBuilderV2::build() {
-    mkdir(index_dir_.c_str(), 0755);
+    if (mkdir(index_dir_.c_str(), 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "ERROR: Cannot create index directory %s: %s\n",
+                index_dir_.c_str(), strerror(errno));
+        return false;
+    }
+    built_host_count_ = 0;
+    built_entry_count_ = 0;
     for (int sid = 0; sid < NUM_SHARDS; sid++) {
         if (shards_[sid].empty()) continue;
         printf("  Building shard %d/%d (%zu entries)... ", sid + 1, NUM_SHARDS, shards_[sid].size());
@@ -116,6 +161,10 @@ size_t IndexBuilderV2::total_entries() const {
 
 bool IndexBuilderV2::build_shard(int sid) {
     auto& items = shards_[sid];
+    if (items.size() > UINT32_MAX) {
+        fprintf(stderr, "ERROR: shard %d exceeds the v2 entry-count limit\n", sid);
+        return false;
+    }
     std::sort(items.begin(), items.end());
 
     // Drop exact duplicates that an incremental re-load can introduce (same URL,
@@ -126,6 +175,8 @@ bool IndexBuilderV2::build_shard(int sid) {
             return a.entry.url_hash == b.entry.url_hash &&
                    a.entry.crawl_date == b.entry.crawl_date &&
                    a.entry.file_offset == b.entry.file_offset &&
+                   a.entry.record_size == b.entry.record_size &&
+                   a.entry.reserved == b.entry.reserved &&
                    a.url == b.url;
         }), items.end());
 
@@ -137,14 +188,11 @@ bool IndexBuilderV2::build_shard(int sid) {
     std::vector<UrlIndexEntry> entries;
     entries.reserve(items.size());
     for (auto& it : items) {
-        // url_len is uint16_t and lookups assume url_pool[offset .. offset+url_len)
-        // is exactly the stored URL, so clamp BOTH the length field and the bytes
-        // appended to the pool to the same value. MAX_URL_LEN (2048) << 65535.
         size_t ulen = it.url.size();
-        if (ulen > MAX_URL_LEN) {
-            fprintf(stderr, "WARN: URL length %zu exceeds MAX_URL_LEN (%u), truncating: %s\n",
-                    ulen, MAX_URL_LEN, it.url.c_str());
-            ulen = MAX_URL_LEN;
+        if (ulen == 0 || ulen > MAX_URL_LEN ||
+            url_pool.size() + ulen > UINT32_MAX) {
+            fprintf(stderr, "ERROR: shard %d URL pool exceeds the v2 format limit\n", sid);
+            return false;
         }
         it.entry.url_offset = static_cast<uint32_t>(url_pool.size());
         it.entry.url_len = static_cast<uint16_t>(ulen);
@@ -185,13 +233,19 @@ bool IndexBuilderV2::build_shard(int sid) {
     }
 
     std::sort(hosts.begin(), hosts.end(), host_cmp);
+    built_host_count_ += hosts.size();
+    built_entry_count_ += entries.size();
 
-    // Write shard file
-    char fname[64];
-    snprintf(fname, sizeof(fname), "%s/url_%02d.idx", index_dir_.c_str(), sid);
-    FILE* f = fopen(fname, "wb");
+    // Write to a sibling temporary file and publish only after every byte has
+    // reached the filesystem buffer successfully. This prevents a short write
+    // from replacing a previously usable shard with a truncated one.
+    char leaf[32];
+    snprintf(leaf, sizeof(leaf), "/url_%02d.idx", sid);
+    std::string fname = index_dir_ + leaf;
+    std::string tmp_name = fname + ".tmp";
+    FILE* f = fopen(tmp_name.c_str(), "wb");
     if (!f) {
-        fprintf(stderr, "ERROR: Cannot create %s\n", fname);
+        fprintf(stderr, "ERROR: Cannot create %s: %s\n", tmp_name.c_str(), strerror(errno));
         return false;
     }
 
@@ -201,11 +255,27 @@ bool IndexBuilderV2::build_shard(int sid) {
     hdr.host_count = static_cast<uint32_t>(hosts.size());
     hdr.url_pool_size = static_cast<uint32_t>(url_pool.size());
 
-    fwrite(&hdr, sizeof(hdr), 1, f);
-    fwrite(hosts.data(), sizeof(HostBlock), hosts.size(), f);
-    fwrite(entries.data(), sizeof(UrlIndexEntry), entries.size(), f);
-    fwrite(url_pool.data(), 1, url_pool.size(), f);
-    fclose(f);
+    bool ok = fwrite(&hdr, sizeof(hdr), 1, f) == 1 &&
+              fwrite(hosts.data(), sizeof(HostBlock), hosts.size(), f) == hosts.size() &&
+              fwrite(entries.data(), sizeof(UrlIndexEntry), entries.size(), f) == entries.size() &&
+              fwrite(url_pool.data(), 1, url_pool.size(), f) == url_pool.size() &&
+              fflush(f) == 0 && fsync_file_descriptor(fileno(f));
+    if (fclose(f) != 0) ok = false;
+    if (!ok) {
+        fprintf(stderr, "ERROR: Short write while creating %s\n", tmp_name.c_str());
+        unlink(tmp_name.c_str());
+        return false;
+    }
+    if (rename(tmp_name.c_str(), fname.c_str()) != 0) {
+        fprintf(stderr, "ERROR: Cannot publish %s: %s\n", fname.c_str(), strerror(errno));
+        unlink(tmp_name.c_str());
+        return false;
+    }
+    if (!fsync_directory_path(index_dir_)) {
+        fprintf(stderr, "ERROR: Cannot sync index directory %s: %s\n",
+                index_dir_.c_str(), strerror(errno));
+        return false;
+    }
 
     size_t sz = sizeof(hdr) + hosts.size() * sizeof(HostBlock)
               + entries.size() * sizeof(UrlIndexEntry) + url_pool.size();

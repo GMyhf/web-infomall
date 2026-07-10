@@ -1,7 +1,7 @@
 # Web InfoMall — C++ Archive System (cross-platform: Linux + macOS)
 #
 # Build:  make              (builds load + serve + verify + bench)
-# Test:   make test         (parser smoke test)
+# Test:   make test         (parser, core, loader, and HTTP regressions)
 # Clean:  make clean
 #
 # Toolchain is auto-detected from `uname -s`:
@@ -50,11 +50,13 @@ else
 endif
 
 CXXFLAGS += $(ZLIB_CFLAGS) -pthread
+DEPFLAGS  = -MMD -MP
 LDLIBS    = $(ZLIB_LIBS) $(PLATFORM_LIBS) -pthread
 LDFLAGS  ?=
 
 # Object files (one per .cpp with no main())
 CORE_OBJS = parser.o store.o indexer.o query.o
+DEPS = $(wildcard *.d)
 
 .PHONY: all clean test help
 
@@ -62,7 +64,7 @@ all: load serve verify bench
 
 # Pattern rule: compile any .cpp to .o
 %.o: %.cpp common.h
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Data loading pipeline
 load: load.o $(CORE_OBJS)
@@ -88,12 +90,21 @@ test_parse: test_parser.o parser.o
 test_store: test_store.o parser.o store.o
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o test_store test_store.o parser.o store.o $(LDLIBS)
 
-test: test_parse
+test_core: test_core.o parser.o store.o indexer.o query.o
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o test_core test_core.o parser.o store.o indexer.o query.o $(LDLIBS)
+
+test: test_parse test_core load serve
 	@echo "=== Parser Test ==="
 	./test_parse ../sample_data/dat0 10
+	@echo "=== Core Regression Tests ==="
+	./test_core
+	@echo "=== Loader Checkpoint Regression ==="
+	/bin/sh ./test_load_checkpoint.sh
+	@echo "=== C++ HTTP Server Regression ==="
+	python3 ./test_http_server.py
 
 clean:
-	rm -f load serve verify bench test_parse test_store *.o
+	rm -f load serve verify bench test_parse test_store test_core *.o *.d
 	rm -rf *.dSYM
 
 help:
@@ -105,7 +116,10 @@ help:
 	@echo "  bench       Build query benchmark tool"
 	@echo "  test_parse  Build parser test (standalone)"
 	@echo "  test_store  Build store test (standalone)"
-	@echo "  test        Run parser smoke test"
+	@echo "  test_core   Build core regression tests"
+	@echo "  test        Run parser, core, loader, and HTTP regression tests"
 	@echo "  clean       Remove all binaries and object files"
 	@echo ""
 	@echo "Detected OS: $(UNAME_S);  CXX=$(CXX)"
+
+-include $(DEPS)

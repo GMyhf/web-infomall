@@ -3,11 +3,15 @@ Parser for the TenMillionArticles dataset format.
 
 Each article uses \\x1e (ASCII 30) as line separator and \\x1f (ASCII 31)
 as article separator. Fields: id, time, url, title, body.
-Encoding: GB2312/GBK for Chinese text fields.
+Encoding: GB18030/GBK for Chinese text fields.
 """
 
 import warnings
-warnings.warn("Phase 1 (Python) is deprecated. Use the C++ Phase 2 system in src/ for production.", DeprecationWarning, stacklevel=2)
+warnings.warn(
+    "Phase 1 (Python) is deprecated. Use the C++ Phase 2 system in src/ for production.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import re
 from dataclasses import dataclass, field
@@ -42,7 +46,7 @@ class ArticleParser:
     # Maximum article size to guard against malformed data (10MB)
     MAX_ARTICLE_BYTES = 10 * 1024 * 1024
 
-    def __init__(self, encoding: str = 'gb2312'):
+    def __init__(self, encoding: str = 'gb18030'):
         self.encoding = encoding
         self.errors = []  # collect parse errors for diagnostics
 
@@ -68,12 +72,11 @@ class ArticleParser:
 
                 buffer += chunk
 
-                # Split on record separator
-                while self.RECORD_SEP in buffer:
-                    idx = buffer.index(self.RECORD_SEP)
-                    raw_record = buffer[:idx]
-                    buffer = buffer[idx + 1:]
-
+                # Split the chunk once. Repeatedly slicing the remaining buffer
+                # copied multi-megabyte tails for every article.
+                records = buffer.split(self.RECORD_SEP)
+                buffer = records.pop()
+                for raw_record in records:
                     if not raw_record.strip():
                         continue
 
@@ -92,6 +95,11 @@ class ArticleParser:
                 if len(buffer) > self.MAX_ARTICLE_BYTES * 2:
                     self.errors.append("Buffer overflow, discarding partial data")
                     buffer = b''
+
+            if buffer.strip() and (not max_articles or article_count < max_articles):
+                self.errors.append(
+                    f"Discarding truncated final record ({len(buffer)} bytes, missing record separator)"
+                )
 
     def _parse_record(self, raw: bytes) -> Optional[Article]:
         """Parse a single article record from raw bytes."""

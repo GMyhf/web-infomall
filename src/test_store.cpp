@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
         auto loc = store.write_article(art.url, date, art.title, art.body);
         if (count % 100 == 0) {
             printf("  Wrote: %s offset=%lld size=%u\n",
-                   loc.file_path.c_str(), loc.offset, loc.size);
+                   loc.file_path.c_str(), static_cast<long long>(loc.offset), loc.size);
         }
         count++;
     });

@@ -16,9 +16,11 @@ src/bench
 src/verify
 src/test_parse
 src/test_store
+src/test_core
 src/debug_url
 src/debug2
 *.o
+*.d
 
 # Python cache
 __pycache__/

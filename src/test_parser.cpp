@@ -21,5 +21,9 @@ int main(int argc, char** argv) {
         printf("  Body:  %.80s...\n\n", art.body.c_str());
     });
     printf("Parsed %d articles, %zu errors\n", count, parser.errors().size());
+    if ((max_articles > 0 && count != max_articles) || !parser.errors().empty()) {
+        fprintf(stderr, "Parser smoke test failed\n");
+        return 1;
+    }
     return 0;
 }

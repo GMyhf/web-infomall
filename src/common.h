@@ -15,6 +15,10 @@
 #include <string_view>
 #include <vector>
 #include <algorithm>
+#include <cstddef>
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
 #include <zlib.h>
 
 // ── Constants ─────────────────────────────────────────────────
@@ -25,6 +29,8 @@ constexpr uint32_t SHARD_MAGIC     = 0x49445821;  // "IDX!" (v2: URL pool embedd
 constexpr int      NUM_SHARDS      = 37;           // Prime, ~Depot's 39
 constexpr int      HOST_HASH_LEN   = 32;
 constexpr int64_t  MAX_DAT_FILE    = 2LL * 1024 * 1024 * 1024; // 2GB
+constexpr uint32_t MAX_RECORD_SIZE = 64u * 1024 * 1024;         // 64MB safety cap
+constexpr uint32_t MAX_BODY_SIZE   = 256u * 1024 * 1024;        // decompressed body cap
 constexpr uint32_t MAX_URL_LEN     = 2048;         // Max URL length stored inline
 constexpr uint32_t URL_PREFIX_LEN  = 64;           // For prefix search optimization
 
@@ -67,7 +73,7 @@ struct UrlIndexEntry {
     uint16_t record_size;    // record size in data file
     uint16_t url_len;        // URL length stored in string pool
     uint32_t url_offset;     // byte offset into URL string pool (at end of shard)
-    uint32_t reserved;       // for future use
+    uint32_t reserved;       // data_NNNN.dat sequence (0 means legacy sequence 1)
     // Total: 8 + 4 + 4 + 2 + 2 + 4 + 4 = 28 bytes (unchanged size)
     // In v2+ shard files, the URL is at: url_pool_base + url_offset
 };
@@ -95,7 +101,7 @@ struct ShardFileHeader {
     // Followed by:
     //   HostBlock hosts[host_count]      (sorted by host)
     //   UrlIndexEntry entries[entry_count] (sorted by host, url_hash, crawl_date DESC)
-    //   char url_pool[url_pool_size]      (concatenated null-terminated URLs)
+    //   char url_pool[url_pool_size]      (concatenated length-delimited URLs)
 };
 #pragma pack(pop)
 
@@ -107,6 +113,45 @@ struct ArchiveMeta {
     uint32_t date_min;
     uint32_t date_max;
 };
+
+// Persist a directory entry after an atomic rename or file creation. Linux
+// requires this in addition to fsyncing the file itself. Some platforms do not
+// support fsync on directories; EINVAL is treated as a best-effort success on
+// macOS while real I/O errors are still reported.
+inline bool fsync_file_descriptor(int fd) {
+    int result;
+    do {
+        result = ::fsync(fd);
+    } while (result != 0 && errno == EINTR);
+    return result == 0;
+}
+
+inline bool fsync_directory_path(const std::string& path) {
+    int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+    int fd = ::open(path.c_str(), flags);
+    if (fd < 0) return false;
+    int result = fsync_file_descriptor(fd) ? 0 : -1;
+#ifdef __APPLE__
+    if (result != 0 && errno == EINVAL) result = 0;
+#endif
+    int saved_errno = errno;
+    if (::close(fd) != 0 && result == 0) {
+        result = -1;
+        saved_errno = errno;
+    }
+    if (result != 0) errno = saved_errno;
+    return result == 0;
+}
+
+inline bool fsync_parent_directory(const std::string& path) {
+    size_t slash = path.find_last_of('/');
+    std::string parent = slash == std::string::npos ? "." :
+                         slash == 0 ? "/" : path.substr(0, slash);
+    return fsync_directory_path(parent);
+}
 
 // ── Hash Functions ────────────────────────────────────────────
 
@@ -162,10 +207,22 @@ inline int shard_for_host(const std::string& host) {
 
 // ── URL Helpers ───────────────────────────────────────────────
 
+inline bool has_http_scheme(const std::string& url) {
+    auto starts_with_ci = [&](const char* prefix, size_t len) {
+        if (url.size() < len) return false;
+        for (size_t i = 0; i < len; i++) {
+            if (std::tolower(static_cast<unsigned char>(url[i])) != prefix[i]) return false;
+        }
+        return true;
+    };
+    return starts_with_ci("http://", 7) || starts_with_ci("https://", 8);
+}
+
 inline std::string extract_host(const std::string& url) {
     const char* start = url.c_str();
-    if (strncmp(start, "http://", 7) == 0) start += 7;
-    else if (strncmp(start, "https://", 8) == 0) start += 8;
+    if (url.size() >= 7 && has_http_scheme(url))
+        start += (url.size() >= 8 &&
+                  std::tolower(static_cast<unsigned char>(url[4])) == 's' ? 8 : 7);
     const char* end = start;
     while (*end && *end != '/' && *end != ':' && *end != '?') end++;
     std::string host(start, end - start);
@@ -173,6 +230,45 @@ inline std::string extract_host(const std::string& url) {
     std::transform(host.begin(), host.end(), host.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return host;
+}
+
+inline bool valid_archive_url(const std::string& url) {
+    if (url.empty() || url.size() > MAX_URL_LEN || !has_http_scheme(url) ||
+        extract_host(url).empty()) return false;
+    for (unsigned char c : url) {
+        if (c <= 0x20 || c == 0x7F) return false;
+    }
+    return true;
+}
+
+inline bool is_leap_year(uint32_t year) {
+    return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+}
+
+inline bool valid_crawl_date(uint32_t date) {
+    uint32_t year = date / 10000;
+    uint32_t month = (date / 100) % 100;
+    uint32_t day = date % 100;
+    if (year == 0 || year > 9999 || month == 0 || month > 12 || day == 0) return false;
+    static constexpr uint8_t DAYS_IN_MONTH[] =
+        {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    uint32_t max_day = DAYS_IN_MONTH[month - 1];
+    if (month == 2 && is_leap_year(year)) max_day++;
+    return day <= max_day;
+}
+
+inline int64_t crawl_date_ordinal(uint32_t date) {
+    if (!valid_crawl_date(date)) return -1;
+    uint32_t year = date / 10000;
+    uint32_t month = (date / 100) % 100;
+    uint32_t day = date % 100;
+    static constexpr uint16_t DAYS_BEFORE_MONTH[] =
+        {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+    uint64_t y = year - 1;
+    uint64_t days = y * 365 + y / 4 - y / 100 + y / 400;
+    days += DAYS_BEFORE_MONTH[month - 1] + day - 1;
+    if (month > 2 && is_leap_year(year)) days++;
+    return static_cast<int64_t>(days);
 }
 
 // ── Comparators ───────────────────────────────────────────────
@@ -199,25 +295,22 @@ inline const UrlIndexEntry* find_first(const UrlIndexEntry* entries, uint32_t co
     return (lo < static_cast<int>(count) && entries[lo].url_hash == hash) ? &entries[lo] : nullptr;
 }
 
-// Bounds-check an entry's slice against the URL pool. pool_size == 0 means
-// "size unknown, skip check" (legacy callers); pass the real size to guard
-// against a corrupted index causing an out-of-bounds read.
+// Bounds-check an entry's slice against the URL pool.
 inline bool entry_in_pool(const UrlIndexEntry& e, uint32_t pool_size) {
-    if (pool_size == 0) return true;  // unknown size — caller opted out
     // Use 64-bit math so url_offset + url_len cannot wrap.
     return static_cast<uint64_t>(e.url_offset) + e.url_len <= pool_size;
 }
 
 // Get URL string from v2 shard's URL pool
 inline std::string entry_url(const UrlIndexEntry& e, const char* url_pool,
-                             uint32_t pool_size = 0) {
+                             uint32_t pool_size) {
     if (!url_pool || e.url_len == 0 || !entry_in_pool(e, pool_size)) return "";
     return std::string(url_pool + e.url_offset, e.url_len);
 }
 
 // Check if entry's URL starts with prefix (from v2 URL pool)
 inline bool entry_url_has_prefix(const UrlIndexEntry& e, const char* url_pool,
-                                  const std::string& prefix, uint32_t pool_size = 0) {
+                                  const std::string& prefix, uint32_t pool_size) {
     if (!url_pool || e.url_len < prefix.size() || !entry_in_pool(e, pool_size)) return false;
     return memcmp(url_pool + e.url_offset, prefix.data(), prefix.size()) == 0;
 }
@@ -225,7 +318,7 @@ inline bool entry_url_has_prefix(const UrlIndexEntry& e, const char* url_pool,
 // Check if entry's host (extracted from URL in pool) contains substr
 // For search_host_substring: does URL's host part match?
 inline bool entry_host_contains(const UrlIndexEntry& e, const char* url_pool,
-                                 const std::string& substr, uint32_t pool_size = 0) {
+                                 const std::string& substr, uint32_t pool_size) {
     if (!url_pool || e.url_len == 0 || !entry_in_pool(e, pool_size)) return false;
     std::string_view url(url_pool + e.url_offset, e.url_len);
     // Extract host from URL
@@ -260,12 +353,21 @@ inline const HostBlock* find_host(const HostBlock* hosts, uint32_t count, const 
 
 // Compute CRC-32 over the record (excluding the crc32 field itself — set to 0)
 inline uint32_t compute_record_crc32(const ArticleRecord* rec) {
-    // CRC covers: header (with crc32=0) + url + title + compressed body
-    uint32_t sz = rec->record_size;
-    std::vector<char> copy(sz);
-    memcpy(copy.data(), rec, sz);
-    reinterpret_cast<ArticleRecord*>(copy.data())->crc32 = 0;
-    return crc32(0, reinterpret_cast<const unsigned char*>(copy.data()), sz);
+    // CRC covers the header (with crc32 treated as zero) and payload. Feed the
+    // three spans incrementally to avoid copying every record solely to clear a
+    // four-byte field.
+    constexpr size_t CRC_OFFSET = offsetof(ArticleRecord, crc32);
+    const auto* bytes = reinterpret_cast<const unsigned char*>(rec);
+    uint32_t checksum = crc32(0, Z_NULL, 0);
+    checksum = crc32(checksum, bytes, static_cast<uInt>(CRC_OFFSET));
+    const uint32_t zero = 0;
+    checksum = crc32(checksum, reinterpret_cast<const unsigned char*>(&zero), sizeof(zero));
+    size_t tail_offset = CRC_OFFSET + sizeof(uint32_t);
+    if (rec->record_size > tail_offset) {
+        checksum = crc32(checksum, bytes + tail_offset,
+                         static_cast<uInt>(rec->record_size - tail_offset));
+    }
+    return checksum;
 }
 
 // ── Content-Type Inference ───────────────────────────────────
@@ -452,13 +554,14 @@ inline std::vector<std::string> tokenize_title(const std::string& title) {
     for (size_t i = 0; i < title.size(); ) {
         unsigned char c = static_cast<unsigned char>(title[i]);
         // Detect CJK: U+4E00–U+9FFF in UTF-8 is 3 bytes: 0xE4 0xB8/0x80–0xE9 0xBF/0xBF
-        if (c >= 0xE4 && i + 2 < title.size()) {
+        if (c >= 0xE4 && c <= 0xE9 && i + 2 < title.size()) {
             unsigned char c2 = static_cast<unsigned char>(title[i+1]);
             unsigned char c3 = static_cast<unsigned char>(title[i+2]);
-            if ((c == 0xE4 && c2 >= 0xB8) || (c == 0xE9 && c2 <= 0xBF) ||
-                (c > 0xE4 && c < 0xE9) ||
-                (c == 0xE4 && c2 == 0xB8 && c3 >= 0x80) ||
-                (c == 0xE9 && c2 == 0xBF && c3 <= 0xBF)) {
+            bool continuation = c2 >= 0x80 && c2 <= 0xBF &&
+                                c3 >= 0x80 && c3 <= 0xBF;
+            bool in_cjk_range = (c == 0xE4 && c2 >= 0xB8) ||
+                                (c >= 0xE5 && c <= 0xE9);
+            if (continuation && in_cjk_range) {
                 // Flush Latin buffer
                 if (!latin_buf.empty()) {
                     if (latin_buf.size() >= 2) terms.push_back(latin_buf);
