@@ -93,7 +93,12 @@ bool MappedShard::open(const char* path) {
         const UrlIndexEntry* block = entries + hb.first_entry;
         for (uint32_t j = 0; j < hb.entry_count; j++) {
             const UrlIndexEntry& ent = block[j];
-            if (!valid_crawl_date(ent.crawl_date)) return fail();
+            // Preserve legacy archive compatibility: some source snapshots
+            // contain calendar-invalid YYYYMMDD values (for example 20030229).
+            // The field is still bounded and sorted numerically; rejecting it
+            // here would make otherwise structurally safe historical indexes
+            // impossible to serve. Integrity verification reports these values
+            // separately.
             if (j > 0) {
                 const UrlIndexEntry& prev = block[j - 1];
                 if (prev.url_hash > ent.url_hash ||
