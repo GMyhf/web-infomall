@@ -121,6 +121,47 @@ UrlIndexEntry make_v2_entry(const std::string& url, uint32_t crawl_date,
     return entry;
 }
 
+struct DeepShardFixtureEntry {
+    std::string url;
+    uint32_t crawl_date;
+    uint32_t file_offset;
+    uint32_t record_size;
+    uint32_t file_seq;
+};
+
+bool write_deep_v2_shard(const std::string& path, const std::string& host,
+                         std::vector<DeepShardFixtureEntry> fixture_entries) {
+    std::sort(fixture_entries.begin(), fixture_entries.end(),
+        [](const DeepShardFixtureEntry& a, const DeepShardFixtureEntry& b) {
+            const uint64_t a_hash = url_hash(a.url);
+            const uint64_t b_hash = url_hash(b.url);
+            if (a_hash != b_hash) return a_hash < b_hash;
+            if (a.crawl_date != b.crawl_date) return a.crawl_date > b.crawl_date;
+            return a.url < b.url;
+        });
+
+    std::string pool;
+    std::vector<UrlIndexEntry> entries;
+    entries.reserve(fixture_entries.size());
+    for (const auto& fixture : fixture_entries) {
+        if (fixture.url.empty() || fixture.url.size() > MAX_URL_LEN ||
+            fixture.record_size > UINT16_MAX ||
+            pool.size() + fixture.url.size() > UINT32_MAX) {
+            return false;
+        }
+        UrlIndexEntry entry = make_v2_entry(fixture.url, fixture.crawl_date,
+                                             static_cast<uint32_t>(pool.size()),
+                                             static_cast<uint16_t>(fixture.record_size));
+        entry.file_offset = fixture.file_offset;
+        entry.reserved = fixture.file_seq;
+        pool += fixture.url;
+        entries.push_back(entry);
+    }
+    return write_v2_shard(path, {make_host_block(host, 0,
+                                                  static_cast<uint32_t>(entries.size()))},
+                          entries, pool);
+}
+
 bool write_uncompressed_article(const std::string& path, const std::string& url,
                                 uint32_t crawl_date, const std::string& title,
                                 const std::string& body) {
@@ -678,6 +719,65 @@ void test_empty_shard_compatibility(TestContext& test, const std::string& root) 
     CHECK(test, !query.init());
 }
 
+void test_deep_block_binary_search(TestContext& test, const std::string& root) {
+    constexpr int UNIQUE_URLS = 64;
+    constexpr int VERSION_COUNT = 24;
+    const std::string archive = root + "/deep-block-archive";
+    const std::string index_dir = archive + "/index";
+    const std::string host = "binary-search.example.test";
+    const std::string version_url = "http://" + host + "/versions";
+    std::filesystem::create_directories(index_dir);
+
+    DataStore store(archive);
+    std::vector<DeepShardFixtureEntry> entries;
+    entries.reserve(UNIQUE_URLS + VERSION_COUNT);
+    std::vector<std::string> urls;
+    urls.reserve(UNIQUE_URLS);
+    for (int i = 0; i < UNIQUE_URLS; i++) {
+        const std::string url = "http://" + host + "/item/" + std::to_string(i);
+        const auto stored = store.write_article(url, 20240201,
+                                                "item " + std::to_string(i), "body");
+        CHECK(test, stored.ok);
+        entries.push_back({url, 20240201, static_cast<uint32_t>(stored.offset), stored.size,
+                           static_cast<uint32_t>(stored.file_seq)});
+        urls.push_back(url);
+    }
+    for (int i = 0; i < VERSION_COUNT; i++) {
+        const uint32_t date = 20240101 + static_cast<uint32_t>(i);
+        const auto stored = store.write_article(version_url, date,
+                                                "version " + std::to_string(i), "body");
+        CHECK(test, stored.ok);
+        entries.push_back({version_url, date, static_cast<uint32_t>(stored.offset), stored.size,
+                           static_cast<uint32_t>(stored.file_seq)});
+    }
+    CHECK(test, store.finish());
+
+    char shard_path[128];
+    snprintf(shard_path, sizeof(shard_path), "%s/url_%02d.idx", index_dir.c_str(),
+             shard_for_host(host));
+    CHECK(test, write_deep_v2_shard(shard_path, host, entries));
+
+    QueryEngine query(archive + "/data", index_dir);
+    CHECK(test, query.init());
+
+    // Every hash position is queried. This is deterministic coverage of the
+    // complete 88-entry block, unlike the benchmark's random sample.
+    for (int i = 0; i < UNIQUE_URLS; i++) {
+        const auto page = query.get_page(urls[i]);
+        CHECK(test, page.url == urls[i] && page.title == "item " + std::to_string(i));
+    }
+    CHECK(test, query.get_page("http://" + host + "/not-present").url.empty());
+
+    // find_first must return the beginning of an equal-hash run, otherwise
+    // get_versions silently skips the older captures after that position.
+    const auto versions = query.get_versions(version_url);
+    CHECK(test, versions.size() == VERSION_COUNT);
+    for (int i = 0; i < VERSION_COUNT; i++) {
+        CHECK(test, versions[i].date == 20240124 - static_cast<uint32_t>(i) &&
+                    versions[i].record_count == 1);
+    }
+}
+
 void test_query_index_roundtrip(TestContext& test, const std::string& root) {
     const std::string archive = root + "/query-archive";
     const std::string prefix(31, 'a');
@@ -766,6 +866,7 @@ int main() {
         test_invalid_date_aggregate_visibility(test, temp.path());
         test_corrupt_input_red_team(test, temp.path());
         test_empty_shard_compatibility(test, temp.path());
+        test_deep_block_binary_search(test, temp.path());
         test_query_index_roundtrip(test, temp.path());
     } catch (const std::exception& error) {
         fprintf(stderr, "FAIL: unexpected exception: %s\n", error.what());

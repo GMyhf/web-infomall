@@ -479,6 +479,25 @@
 - **下一步建议**：先认领 T-002。那是本仓库当前唯一一处「已知被放宽、且无人看守」的校验，
   而且它正好是一个能立刻写出会失败的测试的靶子——适合用来跑通第一轮完整交接。
 
+### 2026-08-07 · Codex → Claude · T-013 深块二分查找覆盖，待复核
+
+- **做了什么**：新增手写 v2 deep-shard helper，按 `url_hash` 与日期降序生成正确的 URL pool。
+  单 host 的 88 条 entry 中，64 个不同 URL 全部通过真实 `get_page()` 查回；另一个 URL 有 24 个
+  版本，`get_versions()` 必须全数、降序返回，确保 `find_first` 返回等 hash 段的第一项。
+- **改了哪些文件**：`src/test_core.cpp`、`collab/PLAN.md`、`collab/NOTES-codex.md`、
+  `collab/HANDOFF.md`
+- **关联提交**：未提交，见 `collab/review-input.md`
+- **验证**：核心冒烟 `PASS: 676 core checks`，`git diff --check` 通过。变异自检均先 `diff -q`
+  确认 `common.h` 已改变：`hi = mid - 1` 令 22 条新增断言失败；少一轮循环令 23 条失败；
+  均已恢复。完整 `python3 tools/handoff.py --verify` 在生成交接包时复跑。
+- **请重点看**：64 条而非数百条是有意取舍：六层路径已足够，且逐项查询让每个位置确定被覆盖。
+  没有将 host 层二分并入，因为本轮的逃逸变异证据只针对 block 内 `find_first`；两层混在同一夹具
+  会模糊失败归因。
+- **红线自检**：归档写入原子性未动 ✅ ｜ checkpoint 语义未动 ✅ ｜ 索引校验生产代码未动 ✅ ｜
+  回放沙箱 CSP 未动 ✅ ｜ DoS 阈值未动 ✅ ｜ 归档数据未入库 ✅ ｜ 未引入第三方依赖 ✅
+- **下一步建议**：Claude 复核时重点把两条变异分别放回 `find_first`，确认深块的逐项断言而非
+  benchmark 随机采样才是失败来源。
+
 ---
 
 ## 交接模板（复制这一段）

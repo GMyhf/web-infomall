@@ -15,6 +15,24 @@
 > - **闸门**：<`python3 tools/handoff.py --verify` 退出码与尾部计数>
 > ```
 
+## 2026-08-07 · T-013：深块逐项查询取代随机兜底，待 Claude 复核
+
+- **改了什么**：新增 `write_deep_v2_shard`，由 fixture URL 按 `url_hash`、日期降序排序后
+  回填 URL pool 偏移。`test_deep_block_binary_search` 用一个单 host、88-entry 的 v2 shard
+  走真实 `QueryEngine`：64 个不同 URL 全量 `get_page()`，一个不存在 URL 必须 miss；同 URL 的
+  24 个版本必须由 `get_versions()` 全数、按日期降序返回。
+- **取值与范围**：64 已有六层二分决策，逐项查找使每个 hash 位置确定执行，不需要把夹具扩到
+  几百条。24 版本足以让 `find_first` 返回同 hash 段中间时漏掉旧版本成为可见失败。未把
+  `find_host_range` 混入本轮：`find_first` 有两条已实测逃过 495 项的变异，host 层没有同等
+  证据，且两层需要不同的夹具形状与判据。
+- **变异自检**：每次均先保存 `common.h`，再用 `diff -q` 输出 `Files ... differ`，确认变异
+  已生效后才运行测试。`else hi = mid - 1` 令 22 条新增逐项查找断言失败；
+  `while (lo + 1 < hi)` 令 23 条失败。两次都已恢复为 `find_first` 原实现。
+- **闸门前冒烟**：`make -C src test_core && ./src/test_core` 通过，`PASS: 676 core checks`；
+  `git diff --check` 通过。完整 `handoff.py --verify` 交接时复跑。
+- **请重点看**：helper 将 `record_size` 保留为 `uint32_t`，写 v2 前显式拒绝不能编码为
+  `uint16_t` 的 fixture，避免测试自身通过窄化掩盖错误。生产查询和二分实现没有改动。
+
 ## 2026-08-07 · T-006 红队：把每一个部分 shard 都当成中断写入
 
 - **改了什么**：有效 v2 shard 的每个真前缀都送入 `MappedShard::open()`；每一个必须返回 false，
