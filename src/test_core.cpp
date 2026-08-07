@@ -776,6 +776,20 @@ void test_deep_block_binary_search(TestContext& test, const std::string& root) {
         CHECK(test, versions[i].date == 20240124 - static_cast<uint32_t>(i) &&
                     versions[i].record_count == 1);
     }
+
+    // The same run, through get_page instead — this is what /replay actually
+    // calls, and it fails differently. Landing mid-run makes get_versions
+    // under-count, which the loop above catches; but it also makes the *default*
+    // lookup return whichever capture happens to be reachable from that
+    // position, so "show me this page" quietly serves the wrong date while every
+    // count still looks plausible. The existing date-targeted coverage
+    // (test_query_index_roundtrip) only ever sees two versions, which is too
+    // short for the run scan or the nearest-date tie-break to matter.
+    CHECK(test, query.get_page(version_url).date == 20240124);          // newest wins
+    CHECK(test, query.get_page(version_url, 20240110).date == 20240110); // exact hit
+    CHECK(test, query.get_page(version_url, 20231201).date == 20240101); // before the run
+    CHECK(test, query.get_page(version_url, 20250101).date == 20240124); // after the run
+    CHECK(test, query.get_page(version_url).title == "version 23");      // right record, not just date
 }
 
 void test_query_index_roundtrip(TestContext& test, const std::string& root) {
