@@ -143,6 +143,17 @@ bool write_uncompressed_article(const std::string& path, const std::string& url,
     return output.good();
 }
 
+std::string read_file_bytes(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+bool write_file_prefix(const std::string& path, const std::string& bytes, size_t size) {
+    std::ofstream output(path, std::ios::binary);
+    output.write(bytes.data(), static_cast<std::streamsize>(size));
+    return output.good();
+}
+
 void test_dates_and_tokenizer(TestContext& test) {
     CHECK(test, is_leap_year(2000));
     CHECK(test, !is_leap_year(1900));
@@ -477,6 +488,77 @@ void test_v2_shard_validation_and_legacy_dates(TestContext& test, const std::str
     { MappedShard shard; CHECK(test, !shard.open(padded.c_str())); }
 }
 
+void test_corrupt_input_red_team(TestContext& test, const std::string& root) {
+    const std::string fixture = root + "/red-team";
+    std::filesystem::create_directories(fixture);
+    const std::string url = "http://red-team.example.test/page";
+    const std::vector<HostBlock> hosts = {make_host_block("red-team.example.test", 0, 1)};
+    const std::vector<UrlIndexEntry> entries = {make_v2_entry(url, 20240101, 0)};
+    const std::string valid_path = fixture + "/valid.idx";
+    CHECK(test, write_v2_shard(valid_path, hosts, entries, url));
+    const std::string valid_bytes = read_file_bytes(valid_path);
+    CHECK(test, !valid_bytes.empty());
+
+    // Every proper prefix is a plausible interrupted write. Each must be
+    // rejected without leaving a half-mapped shard behind for a caller to use.
+    const std::string truncated_path = fixture + "/truncated.idx";
+    for (size_t size = 0; size < valid_bytes.size(); size++) {
+        CHECK(test, write_file_prefix(truncated_path, valid_bytes, size));
+        MappedShard shard;
+        CHECK(test, !shard.open(truncated_path.c_str()));
+        CHECK(test, shard.fd == -1 && shard.data == nullptr && shard.header == nullptr);
+    }
+
+    // Bit-level damage to the fields the parser relies on must also fail cleanly.
+    auto bad_magic = valid_bytes;
+    // Do not flip bit 0: SHARD_MAGIC ("IDX!") would become the supported v1
+    // magic ("IDX "), an intentionally indistinguishable compatibility case.
+    bad_magic[0] ^= 0x02;
+    const std::string magic_path = fixture + "/bad-magic.idx";
+    CHECK(test, write_file_prefix(magic_path, bad_magic, bad_magic.size()));
+    { MappedShard shard; CHECK(test, !shard.open(magic_path.c_str())); }
+
+    auto zero_url_length = entries;
+    zero_url_length[0].url_len = 0;
+    const std::string zero_url_path = fixture + "/zero-url-length.idx";
+    CHECK(test, write_v2_shard(zero_url_path, hosts, zero_url_length, url));
+    { MappedShard shard; CHECK(test, !shard.open(zero_url_path.c_str())); }
+
+    const std::string data_dir = fixture + "/data";
+    std::filesystem::create_directories(data_dir);
+    ArticleReader reader(data_dir);
+
+    ArticleRecord bad_magic_record = {};
+    bad_magic_record.magic = 0;
+    bad_magic_record.record_size = ArticleRecord::HEADER_SIZE;
+    CHECK(test, write_file_prefix(data_dir + "/bad-magic.dat",
+                                  std::string(reinterpret_cast<char*>(&bad_magic_record),
+                                              sizeof(bad_magic_record)),
+                                  sizeof(bad_magic_record)));
+    CHECK(test, !reader.read_article("bad-magic.dat", 0, ArticleRecord::HEADER_SIZE).valid);
+
+    ArticleRecord truncated_record = {};
+    truncated_record.magic = ARTICLE_MAGIC;
+    truncated_record.record_size = ArticleRecord::HEADER_SIZE + 8;
+    const std::string truncated_bytes(reinterpret_cast<char*>(&truncated_record),
+                                      sizeof(truncated_record));
+    CHECK(test, write_file_prefix(data_dir + "/truncated-record.dat", truncated_bytes,
+                                  truncated_bytes.size()));
+    CHECK(test, !reader.read_article("truncated-record.dat", 0,
+                                     ArticleRecord::HEADER_SIZE).valid);
+
+    ArticleRecord mismatched_record = {};
+    mismatched_record.magic = ARTICLE_MAGIC;
+    mismatched_record.url_len = 1;
+    mismatched_record.record_size = ArticleRecord::HEADER_SIZE;
+    const std::string mismatched_bytes(reinterpret_cast<char*>(&mismatched_record),
+                                       sizeof(mismatched_record));
+    CHECK(test, write_file_prefix(data_dir + "/mismatched-record.dat", mismatched_bytes,
+                                  mismatched_bytes.size()));
+    CHECK(test, !reader.read_article("mismatched-record.dat", 0,
+                                     ArticleRecord::HEADER_SIZE).valid);
+}
+
 void test_empty_shard_compatibility(TestContext& test, const std::string& root) {
     const std::string archive = root + "/empty-shard-archive";
     const std::string index_dir = archive + "/index";
@@ -586,6 +668,7 @@ int main() {
         test_truncated_store_append(test, temp.path());
         test_corrupt_shard(test, temp.path());
         test_v2_shard_validation_and_legacy_dates(test, temp.path());
+        test_corrupt_input_red_team(test, temp.path());
         test_empty_shard_compatibility(test, temp.path());
         test_query_index_roundtrip(test, temp.path());
     } catch (const std::exception& error) {

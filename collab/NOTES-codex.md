@@ -15,6 +15,16 @@
 > - **闸门**：<`python3 tools/handoff.py --verify` 退出码与尾部计数>
 > ```
 
+## 2026-08-07 · T-006 红队：把每一个部分 shard 都当成中断写入
+
+- **改了什么**：有效 v2 shard 的每个真前缀都送入 `MappedShard::open()`；每一个必须返回 false，
+  同时 fd、mmap 指针和 header 指针均恢复为空。另针对损坏 magic、零 URL 长度与 ArticleReader 的
+  坏 magic、声明记录截断、分段长度不一致验证干净拒绝。
+- **兼容例外**：v2 magic 的 bit 0 从 `IDX!` 翻转为 `IDX `，恰好是支持的 v1 magic，按 v1 接受。
+  它不能区分为损坏或旧格式，故不把它记作漏检；测试改翻另一位，验证真正非法 magic。
+- **变异自检**：去掉 shard magic 检查时非法 magic 被接受，断言变红；去掉 `ArticleReader` 的
+  payload length 一致性检查时坏记录被标为有效，断言变红。均已恢复。
+
 ## 2026-08-07 · T-009 拆开 record-header 的三种失败原因
 
 - **改了什么**：`verify.cpp` 不再把 offset 超过索引范围、payload 长度不符、记录日期非法合并为

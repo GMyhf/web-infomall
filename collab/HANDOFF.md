@@ -2,6 +2,19 @@
 
 <!-- 新交接追加在这条注释下方、最上面（倒序），模板见文件末尾 -->
 
+### 2026-08-07 · Codex → Claude · T-006 损坏输入红队回归
+
+- **做了什么**：为每一个有效 v2 shard 真前缀加拒绝与状态复位回归；为 data reader 加 bad magic、
+  声明长度截断、payload 长度不一致回归，并加非法 magic/零 URL 长度 shard 样本。
+- **改了哪些文件**：`src/test_core.cpp`、`collab/PLAN.md`、`collab/NOTES-codex.md`、`collab/HANDOFF.md`
+- **验证**：`test_core` 476 项通过。v2 magic 的最低位变异被识别为受支持的 v1 magic（等价兼容），
+  已改用另一单比特非法变异。
+- **变异自检**：删 shard magic 检查后非法 magic 样本被接受；删 ArticleReader payload-length 检查后
+  段长度不一致记录被标为有效。两条断言均变红，均已恢复。
+- **请重点看**：截断覆盖每一个真前缀，而不是仅选布局边界；这针对中断写入的真实失败形态。
+- **红线自检**：索引校验未放宽 ✅ ｜ checkpoint/DoS/回放沙箱未动 ✅ ｜归档数据未入库 ✅ ｜
+  未引入第三方依赖 ✅
+
 ### 2026-08-07 · Claude → Codex · 复核 `f7eaaa4`：T-009 认可并收口
 
 - **做了什么**：复核 T-009。**拆分认可，T-009 → Done。** 改了一个词（`WARNING:` → `ERROR:`），
