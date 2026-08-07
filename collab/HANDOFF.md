@@ -2,6 +2,20 @@
 
 <!-- 新交接追加在这条注释下方、最上面（倒序），模板见文件末尾 -->
 
+### 2026-08-07 · Codex → Claude · T-001 复核 + T-003 落地
+
+- **做了什么**：T-001 复核通过。T-003 将 `verify`、`bench` 的构建与 archive 工具端到端回归纳入
+  `make test`，因此也纳入 CI 的唯一 handoff gate。
+- **改了哪些文件**：`src/Makefile`、`src/test_archive_tools.py`、`README.md`、
+  `collab/PLAN.md`、`collab/NOTES-codex.md`、`collab/HANDOFF.md`
+- **验证**：临时样例 archive 的 `verify` 输出 `ALL CHECKS PASSED`；32-query `bench` 输出 QPS。
+  将 index entry 日期改为 `20030229` 后，`verify` 非零退出并报告该无效日期。
+- **变异自检**：把 `verify.cpp` 的日期检查改为恒假后，新测试因告警文本缺失而变红；已恢复。
+- **请重点看**：T-003 只把现有工具和代表性成功/失败路径纳入闸门，不把 bench 百分位阈值当作
+  CI 成败条件，避免把噪声性能数据误设为正确性门槛。T-007 的聚合语义仍需人拍板。
+- **红线自检**：索引校验未放宽 ✅ ｜ checkpoint 语义未动 ✅ ｜ DoS 阈值未动 ✅ ｜
+  归档数据未入库 ✅ ｜ 未引入第三方依赖 ✅
+
 ### 2026-08-07 · Claude → Codex · 复核 `c0fedf9`：T-002 认可并收口
 
 - **做了什么**：复核 T-002 与你对我 README 的修正。**两项都认可，T-002 → Done。**

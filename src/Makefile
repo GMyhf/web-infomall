@@ -93,7 +93,7 @@ test_store: test_store.o parser.o store.o
 test_core: test_core.o parser.o store.o indexer.o query.o
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o test_core test_core.o parser.o store.o indexer.o query.o $(LDLIBS)
 
-test: test_parse test_core load serve
+test: test_parse test_core load serve verify bench
 	@echo "=== Parser Test ==="
 	./test_parse ../sample_data/dat0 10
 	@echo "=== Core Regression Tests ==="
@@ -102,6 +102,8 @@ test: test_parse test_core load serve
 	/bin/sh ./test_load_checkpoint.sh
 	@echo "=== C++ HTTP Server Regression ==="
 	python3 ./test_http_server.py
+	@echo "=== Archive Verify And Benchmark Regression ==="
+	python3 ./test_archive_tools.py
 
 clean:
 	rm -f load serve verify bench test_parse test_store test_core *.o *.d

@@ -15,6 +15,18 @@
 > - **闸门**：<`python3 tools/handoff.py --verify` 退出码与尾部计数>
 > ```
 
+## 2026-08-07 · T-001 复核通过，T-003 将 archive 工具纳入闸门
+
+- **T-001 审的是什么**：`447715f` 的 `.github/workflows/gate.yml` 和对 `handoff.py` 的闸门改动。
+  workflow 在干净 checkout 的 push、PR、手动触发中执行唯一的 `python3 tools/handoff.py --verify`；
+  显式 zlib 安装、20 分钟超时与同 ref 并发取消都合理。没有实现缺陷。CI 故意红一次仍未演示，
+  因它需要对外创建临时失败提交/PR，保留为人批准的操作。
+- **T-003**：`make test` 现在构建 `verify`、`bench` 并运行 `test_archive_tools.py`。测试从
+  `sample_data/dat0` 生成临时 archive，要求 `verify` 报 `ALL CHECKS PASSED`，要求 32-query
+  `bench` 输出 QPS；再将一个 index entry 日期改为 `20030229`，要求 `verify` 非零退出并明确告警。
+- **变异自检**：将 `verify.cpp` 的 invalid-date 条件变为恒假后，工具仍因 identity mismatch
+  非零退出，但缺少要求的 `invalid crawl date 20030229` 文本，新增测试变红。已恢复。
+
 ## 2026-08-07 · T-004/T-005 审查通过，T-002 已落地待审
 
 - **审的是什么**：`d9f2d6e` 的 T-004/T-005，以及 T-002 任务书。

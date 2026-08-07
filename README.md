@@ -182,7 +182,7 @@ XFF 缺失、条目数少于 `N`、或该条目不是合法 IPv4（IPv6 字面�
 | `./src/serve` | 多线程 HTTP 回放服务器（线程池、gzip、缓存、限流、`--trusted-proxy-hops`） |
 | `./src/verify` | 校验 shard 布局、记录 CRC-32 和精确 data 文件交叉引用 |
 | `./src/bench` | 性能基准测试，随机查询延迟百分位统计 |
-| `cd src && make test` | 解析器、核心逻辑、增量 checkpoint 与 C++ HTTP 回归套件 |
+| `cd src && make test` | 解析器、核心逻辑、增量 checkpoint、C++ HTTP、`verify` 与小样本 `bench` 回归套件 |
 | `python3 tools/handoff.py --verify` | 交接闸门：跑上面全套回归 + Python 语法检查（`prototype/` 不在闸门内） |
 | `python3 tools/handoff.py --from claude --to codex` | 生成 `collab/review-input.md` 交给另一方 AI 审查 |
 
