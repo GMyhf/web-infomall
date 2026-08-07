@@ -2,6 +2,36 @@
 
 <!-- 新交接追加在这条注释下方、最上面（倒序），模板见文件末尾 -->
 
+### 2026-08-07 · Claude → Codex · T-001 闸门进 CI
+
+- **做了什么**：加 `.github/workflows/gate.yml`，push / PR / 手动触发都跑
+  `python3 tools/handoff.py --verify`。用户可见行为零改动，不碰 `src/`。
+- **改了哪些文件**：`.github/workflows/gate.yml`（新增）、`tools/handoff.py`、
+  `collab/PLAN.md`、`collab/HANDOFF.md`、`collab/NOTES-claude.md`
+- **关联提交**：见本轮 commit
+- **验证**：三层，都是真跑的：
+  1. 本地闸门退出码 0：`PASS: 89 core checks` ／ `PASS: loader checkpoint and incremental
+     validation regressions` ／ `PASS: C++ HTTP framing, gzip/ETag, validation, and pipelining`
+     ／ `Ran 4 tests ... OK`。
+  2. **全新 clone 实测**：`git clone git@github.com:GMyhf/web-infomall.git` 到空目录后
+     直接跑闸门，退出码 0、四套全绿。T-001 里「应当成立但没人验证过」那句现在有依据了。
+  3. **CI 真跑过一次**（结论见 PLAN 备注列 / 本条下方补记），不是「配好了应该能跑」。
+  4. 变异自检两条：`--no-proto` 与 `sample_data/dat0` 缺失两条跳过路径都确实留痕。
+- **请重点看**：
+  1. **workflow 刻意只有一条实质命令。** 我没有在 yml 里罗列各测试步骤——一旦罗列，
+     CI 就成了闸门的第二份定义，两份定义迟早不一致，而不一致的那天通常没人发现。
+     代价是 CI 的日志分组不好看（全挤在一个 step 里）。如果你更看重可读性，说服我。
+  2. **我顺手堵了一个静默漏洞，判断可能过头。** 原型回归那步是「`sample_data/dat0` 在
+     才跑」，文件不在就**无声消失**——读输出的人会把「没跑」当成「跑过且没问题」。
+     现在跳过会打印 ⚠️ 留在输出里。但我**没有**让它变红（缺文件不等于代码坏了），
+     这个取舍你可以不同意：也可以主张 dat0 缺失就该直接红。
+  3. `enforce_admins` / 分支保护我一律没动。把 `gate` 设成 `main` 的必需检查是权限动作，
+     属于人拍板范围，我只把闸门准备好。
+- **红线自检**：本轮不含 `src/` 改动 ✅ ｜ 归档数据未入库 ✅ ｜ 未引入第三方依赖 ✅
+  （workflow 只用 `actions/checkout@v4` 与 apt 装 zlib1g-dev，不引入项目依赖）
+- **下一步建议**：接 T-002。CI 已经在盯着了，现在往里补的每一条测试都会被每次 push 执行——
+  这时候补 `99d97d3` 那处无人看守的放宽，收益最大。
+
 ### 2026-08-07 · Claude → Codex · T-000 协作脚手架落地
 
 - **做了什么**：把 `cs101.openjudge.cn/collab` 的 Claude⇄Codex 脚手架移植到本仓库，

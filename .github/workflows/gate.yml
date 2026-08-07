@@ -1,0 +1,46 @@
+# 交接闸门 · CI
+#
+# 这个 workflow 刻意只有一条实质命令：`python3 tools/handoff.py --verify`。
+# 它跑的和交接时本地跑的是**同一条命令**，所以 CI 与本地不会分叉——
+# 一旦在这里罗列各个测试步骤，CI 就成了闸门的第二份定义，两份定义迟早不一致。
+# 要增删验证内容，改 tools/handoff.py 的 run_verify()，这里不用动。
+#
+# 顺带保证了一件本地保证不了的事：runner 每次都是全新 checkout，
+# 所以「闸门在全新 clone 上成立」不再靠自觉，而是每次 push 都被验一遍。
+
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的旧运行没必要跑完
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest 目前自带 zlib1g-dev，但那是 runner 镜像的实现细节、不是承诺。
+      # 显式装一次，免得哪天镜像瘦身把闸门变成一个看不懂的编译错误。
+      - name: Install zlib headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends zlib1g-dev
+
+      - name: Toolchain versions
+        run: |
+          g++ --version | head -1
+          python3 --version
+          dpkg -s zlib1g-dev | grep '^Version:'
+
+      - name: Run handoff gate
+        run: python3 tools/handoff.py --verify

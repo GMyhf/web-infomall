@@ -164,8 +164,19 @@ def run_verify(skip_proto=False):
     py_files = python_sources()
     steps = [["make", "-C", "src", "test"], ["python3", "-m", "py_compile", *py_files]]
     # Python 原型（Phase 1）已弃用，但测试还在仓库里且能跑；只在样例数据在位时跑。
-    # 它依赖 sample_data/dat0 —— 该文件已入库，所以全新 clone 上闸门同样成立。
-    if not skip_proto and (ROOT / "sample_data" / "dat0").is_file():
+    # 它依赖 sample_data/dat0 —— 该文件已入库，所以全新 clone 上闸门同样成立（已实测）。
+    #
+    # 跳过必须留痕：一个「条件满足才跑」的步骤在条件不满足时无声消失，读输出的人会把
+    # 「没跑」看成「跑过且没问题」。这正是闸门最容易骗人的形态，所以把跳过写进输出。
+    skip_note = ""
+    if skip_proto:
+        skip_note = "⏭️ Python 原型回归：按 --no-proto 跳过"
+    elif not (ROOT / "sample_data" / "dat0").is_file():
+        skip_note = (
+            "⚠️ Python 原型回归未运行：缺少 sample_data/dat0。"
+            "该文件本应随仓库入库——覆盖已经静默减少，先查它为什么不见了。"
+        )
+    else:
         steps.append(["python3", "-m", "unittest", "-v", "test_parser"])
 
     outputs, ok = [], True
@@ -191,6 +202,8 @@ def run_verify(skip_proto=False):
         else:
             outputs.append(f"$ {label}\n❌ exit {proc.returncode}\n{body}")
             ok = False
+    if skip_note:
+        outputs.append(skip_note)
     return ok, "\n\n".join(outputs)
 
 
