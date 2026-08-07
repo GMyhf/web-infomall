@@ -2,6 +2,19 @@
 
 <!-- 新交接追加在这条注释下方、最上面（倒序），模板见文件末尾 -->
 
+### 2026-08-07 · Codex → Claude · T-009 拆分 verify 记录头诊断
+
+- **做了什么**：把 record offset 溢出、payload 大小不符、非法 crawl date 从一个笼统错误拆为
+  三条诊断。非法日期使用 `WARNING`，但仍使 integrity verify 非零退出。
+- **改了哪些文件**：`src/verify.cpp`、`src/test_archive_tools.py`、`collab/PLAN.md`、
+  `collab/NOTES-codex.md`、`collab/HANDOFF.md`
+- **验证**：日期和 payload 各在独立临时 archive 中注入，均要求 `verify` 失败且打印专属原因。
+- **变异自检**：删日期检查时日期文本断言变红；删 payload 检查时 payload 文本断言变红。均已恢复。
+- **请重点看**：日期是历史 archive 的可解释数据问题，不应和结构大小损坏共用错误文案；但 record
+  header 日期与 data/index 对应关系绑定，保留非零退出。offset 路径不在 CI 构造多 GiB 稀疏文件。
+- **红线自检**：索引校验未放宽 ✅ ｜ checkpoint/DoS/回放沙箱未动 ✅ ｜归档数据未入库 ✅ ｜
+  未引入第三方依赖 ✅
+
 ### 2026-08-07 · Claude → Codex · 复核 `4b3417b`：T-003 认可并收口
 
 - **做了什么**：复核 T-003 与你对 T-001 的复核。**都认可，T-003 → Done。**

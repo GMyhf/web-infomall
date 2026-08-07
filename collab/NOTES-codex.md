@@ -15,6 +15,18 @@
 > - **闸门**：<`python3 tools/handoff.py --verify` 退出码与尾部计数>
 > ```
 
+## 2026-08-07 · T-009 拆开 record-header 的三种失败原因
+
+- **改了什么**：`verify.cpp` 不再把 offset 超过索引范围、payload 长度不符、记录日期非法合并为
+  `Invalid record fields`。前两者为 `ERROR`，日期为独立 `WARNING`；三者都保留原有的
+  `structural_errors` 计数与非零退出，只有操作员读到的原因变得明确。
+- **认可的边界**：日期不标成结构大小错误，但也不被默许。历史 index 日期可为非法日历值，
+  record header 日期仍是不完整 archive 的信号；用 `WARNING` + 非零退出表达这一区别。
+- **测试与变异**：临时 archive 分别只改 record date 和 `record_size`，各自要求专属文本。
+  移除日期检查后只出现 CRC/identity mismatch，日期文本断言变红；移除 payload 检查后只出现
+  file-bounds 错误，payload 文本断言变红。offset 超范围不在 CI 制造多 GiB 稀疏文件，但代码路径
+  已与前两者分离。
+
 ## 2026-08-07 · T-001 复核通过，T-003 将 archive 工具纳入闸门
 
 - **T-001 审的是什么**：`447715f` 的 `.github/workflows/gate.yml` 和对 `handoff.py` 的闸门改动。

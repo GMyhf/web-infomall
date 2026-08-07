@@ -316,12 +316,28 @@ static void scan_data_file(const std::string& path,
             break;
         }
 
+        if (offset > UINT32_MAX) {
+            fprintf(stderr, "ERROR: Record offset %lld exceeds the 32-bit index range in %s\n",
+                    (long long)offset, path.c_str());
+            stats.structural_errors++;
+            break;
+        }
+
         uint64_t payload_size = static_cast<uint64_t>(ArticleRecord::HEADER_SIZE)
             + hdr.url_len + hdr.title_len + hdr.body_compr_len;
-        if (payload_size != hdr.record_size || !valid_crawl_date(hdr.crawl_date) ||
-            offset > UINT32_MAX) {
-            fprintf(stderr, "ERROR: Invalid record fields at offset %lld in %s\n",
-                    (long long)offset, path.c_str());
+        if (payload_size != hdr.record_size) {
+            fprintf(stderr, "ERROR: Record payload size %llu does not match record size %u "
+                    "at offset %lld in %s\n", (unsigned long long)payload_size,
+                    hdr.record_size, (long long)offset, path.c_str());
+            stats.structural_errors++;
+            break;
+        }
+        if (!valid_crawl_date(hdr.crawl_date)) {
+            // Legacy index dates are still serviceable; a record header date is
+            // not. Keep this separately visible so an operator does not mistake
+            // a historical-date warning for a malformed record-size failure.
+            fprintf(stderr, "WARNING: Record at offset %lld has invalid crawl date %u in %s\n",
+                    (long long)offset, hdr.crawl_date, path.c_str());
             stats.structural_errors++;
             break;
         }

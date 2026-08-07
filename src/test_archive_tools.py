@@ -59,6 +59,7 @@ def main():
             raise RuntimeError(f"verify did not report the invalid index date:\n{invalid_date.stdout}")
 
     check_invalid_record_date()
+    check_invalid_record_payload_size()
     print("PASS: archive verify success/failure paths and benchmark smoke test")
 
 
@@ -88,13 +89,29 @@ def check_invalid_record_date():
         result = run(str(SRC / "verify"), str(archive))
         if result.returncode == 0:
             raise RuntimeError(f"verify accepted an invalid record date:\n{result.stdout}")
-        # The message bundles three conditions (payload size, date, offset range)
-        # behind one string, so it cannot say *which* one fired. Corrupting only
-        # the date keeps the other two satisfied, which is what makes this an
-        # assertion about the date check rather than about the message: drop
-        # valid_crawl_date from that condition and verify stops complaining.
-        if "Invalid record fields" not in result.stdout:
+        if "Record at offset 0 has invalid crawl date 20030229" not in result.stdout:
             raise RuntimeError(f"verify did not report the invalid record date:\n{result.stdout}")
+
+
+def check_invalid_record_payload_size():
+    """A malformed record length must not be conflated with an invalid date."""
+    with tempfile.TemporaryDirectory(prefix="web-infomall-record-payload-") as tmp:
+        archive = Path(tmp) / "archive"
+        require_success(run(str(SRC / "load"), str(SAMPLE_DATA), str(archive),
+                            "--files", "0"), "sample load")
+
+        record = sorted((archive / "data").glob("*/data_*.dat"))[0]
+        with record.open("r+b") as data:
+            data.seek(28)  # ArticleRecord.record_size
+            original_size = struct.unpack("=I", data.read(4))[0]
+            data.seek(28)
+            data.write(struct.pack("=I", original_size + 1))
+
+        result = run(str(SRC / "verify"), str(archive))
+        if result.returncode == 0:
+            raise RuntimeError(f"verify accepted an invalid record payload size:\n{result.stdout}")
+        if "Record payload size" not in result.stdout or "does not match record size" not in result.stdout:
+            raise RuntimeError(f"verify did not report the payload mismatch:\n{result.stdout}")
 
 
 if __name__ == "__main__":
