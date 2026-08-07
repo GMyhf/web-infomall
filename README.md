@@ -161,6 +161,17 @@ docker run -p 8088:8088 -v /path/to/archive:/archive:ro web-infomall
 | `./src/verify` | 校验 shard 布局、记录 CRC-32 和精确 data 文件交叉引用 |
 | `./src/bench` | 性能基准测试，随机查询延迟百分位统计 |
 | `cd src && make test` | 解析器、核心逻辑、增量 checkpoint 与 C++ HTTP 回归套件 |
+| `python3 tools/handoff.py --verify` | 交接闸门：跑上面全套回归 + Python 语法检查 + 原型回归 |
+| `python3 tools/handoff.py --from claude --to codex` | 生成 `collab/review-input.md` 交给另一方 AI 审查 |
+
+## 协作方式（Claude ⇄ Codex）
+
+本仓库用 `collab/` 目录作为两个 AI agent 的共享事实源：`PLAN.md`（唯一任务清单与决策记录）、
+`HANDOFF.md`（交接日志）、`NOTES-claude.md` / `NOTES-codex.md`（双方留言）。
+一轮标准循环、协作模式与**本项目红线清单**见 [`collab/README.md`](collab/README.md)。
+
+交回代码时必须附一次真正跑完的 `python3 tools/handoff.py --verify` 结果（含各步尾部计数）；
+性能声明必须附 `./src/bench` 的百分位输出与归档规模。
 
 ## 文件说明
 

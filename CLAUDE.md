@@ -6,6 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Web InfoMall is a Wayback Machine-like historical web page replay system for Chinese news articles (1991–2017), based on Peking University Network Lab's Depot architecture. The data source is the [CWIRF 1000万新闻网页数据集](https://www.cwirf.org/).
 
+## Collaboration scaffold (Claude ⇄ Codex) — read before starting work
+
+`collab/` is the shared source of truth between the two AI agents. **Read `collab/PLAN.md`
+and `collab/README.md` before touching code**; claim a task in `PLAN.md` (sign it, flip it to
+`In progress`) before implementing, so the two agents don't edit the same region of the same file.
+
+| File | Role |
+|------|------|
+| `collab/README.md` | The loop, the collaboration modes, and **this project's red lines** (the review checklist) |
+| `collab/PLAN.md` | Single task board (`T-NNN`) + Decision Log |
+| `collab/HANDOFF.md` | Handoff log, newest first; template at the bottom of the file |
+| `collab/NOTES-claude.md` / `NOTES-codex.md` | Each agent's notes to the other — write what you're *unsure* about |
+| `collab/review-input.md` | Generated per handoff by `tools/handoff.py`; **not versioned** |
+
+```bash
+python3 tools/handoff.py --verify                        # the gate: make -C src test + py_compile + prototype regression
+python3 tools/handoff.py --from claude --to codex        # generate the review package
+```
+
+Handing work back requires a real `--verify` run pasted into `HANDOFF.md`, including each
+step's tail counts — not "looks fine to me". Performance claims require `./src/bench`
+percentile output plus the archive size they were measured on.
+
 ## Build & Run
 
 ### C++ system (Phase 2 v2 — production)

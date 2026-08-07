@@ -45,3 +45,6 @@ src/*.dSYM/
 
 # Archive output
 archive.db
+
+# Collab scaffold: review packages are generated per handoff, not versioned
+collab/review-input.md
