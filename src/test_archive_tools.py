@@ -58,7 +58,43 @@ def main():
         if "has invalid crawl date 20030229" not in invalid_date.stdout:
             raise RuntimeError(f"verify did not report the invalid index date:\n{invalid_date.stdout}")
 
+    check_invalid_record_date()
     print("PASS: archive verify success/failure paths and benchmark smoke test")
+
+
+def check_invalid_record_date():
+    """verify has a *second* date check, on the record header rather than the index.
+
+    Both exist because the relaxation in 99d97d3 removed calendar validation from
+    MappedShard::open and named verify as the compensating boundary — but that
+    boundary is two separate branches, and pinning only the index one leaves half
+    the hedge unguarded. This branch is reachable and fires before the CRC pass
+    (a corrupted date reports no CRC mismatch, because the structural check breaks
+    out first), so it is testable today.
+
+    Uses its own archive: the index-side case above leaves that one corrupted, and
+    a failure has to be attributable to exactly one injected fault.
+    """
+    with tempfile.TemporaryDirectory(prefix="web-infomall-record-date-") as tmp:
+        archive = Path(tmp) / "archive"
+        require_success(run(str(SRC / "load"), str(SAMPLE_DATA), str(archive),
+                            "--files", "0"), "sample load")
+
+        record = sorted((archive / "data").glob("*/data_*.dat"))[0]
+        with record.open("r+b") as data:
+            data.seek(8)  # ArticleRecord.crawl_date
+            data.write(struct.pack("=I", 20030229))
+
+        result = run(str(SRC / "verify"), str(archive))
+        if result.returncode == 0:
+            raise RuntimeError(f"verify accepted an invalid record date:\n{result.stdout}")
+        # The message bundles three conditions (payload size, date, offset range)
+        # behind one string, so it cannot say *which* one fired. Corrupting only
+        # the date keeps the other two satisfied, which is what makes this an
+        # assertion about the date check rather than about the message: drop
+        # valid_crawl_date from that condition and verify stops complaining.
+        if "Invalid record fields" not in result.stdout:
+            raise RuntimeError(f"verify did not report the invalid record date:\n{result.stdout}")
 
 
 if __name__ == "__main__":
