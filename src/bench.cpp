@@ -98,11 +98,17 @@ int main(int argc, char* argv[]) {
 
     auto bench_start = std::chrono::high_resolution_clock::now();
 
+    // Every URL here was generated from the index, so every lookup must find
+    // exactly that URL. Counting is not bookkeeping: without it a broken binary
+    // search misses all of them and reports a *higher* QPS, because a miss
+    // returns earlier than a hit. A benchmark that cannot tell a hit from a miss
+    // will report a correctness bug as a speedup.
+    size_t misses = 0;
     for (size_t i = 0; i < urls.size(); i++) {
         auto t0 = std::chrono::high_resolution_clock::now();
         auto result = qe.get_page(urls[i]);
         auto t1 = std::chrono::high_resolution_clock::now();
-        (void)result;
+        if (result.url != urls[i]) misses++;
 
         double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
         latencies_us.push_back(us);
@@ -138,6 +144,8 @@ int main(int argc, char* argv[]) {
     printf("| %-36s | %-22.4f s |\n", "Total Time", total_sec);
     printf("| %-36s | %-22.1f |\n", "Queries/sec (QPS)", qps);
     printf("+--------------------------------------+------------------------+\n");
+    printf("| %-36s | %-22zu |\n", "Lookup misses", misses);
+    printf("+--------------------------------------+------------------------+\n");
     printf("| %-36s | %-22.1f |\n", "Min Latency (us)", min_lat);
     printf("| %-36s | %-22.1f |\n", "Avg Latency (us)", avg);
     printf("| %-36s | %-22.1f |\n", "Max Latency (us)", max_lat);
@@ -147,5 +155,14 @@ int main(int argc, char* argv[]) {
     printf("| %-36s | %-22.1f |\n", "P99 Latency (us)", p99);
     printf("+--------------------------------------+------------------------+\n");
 
+    // Fail loudly. Every URL came out of the index, so a miss means the lookup
+    // path is wrong, and the timings above are measuring the wrong thing —
+    // reporting them as a success would be worse than reporting nothing.
+    if (misses > 0) {
+        fprintf(stderr, "\nERROR: %zu of %zu lookups did not return the requested URL. "
+                "The latency figures above describe failed lookups, not queries.\n",
+                misses, urls.size());
+        return 1;
+    }
     return 0;
 }

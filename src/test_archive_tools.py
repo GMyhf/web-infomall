@@ -52,10 +52,22 @@ def main():
         if "Result: ALL CHECKS PASSED" not in verified.stdout:
             raise RuntimeError(f"verify did not report a clean archive:\n{verified.stdout}")
 
-        benchmark = run(str(SRC / "bench"), str(archive / "data"), str(archive / "index"), "32")
+        # 300 rather than 32: bench is now a correctness check as well as a
+        # latency one (T-012), and its power comes from sampling enough URLs that
+        # a broken lookup path cannot hide. Cost is negligible — bench does 500
+        # queries in ~5ms.
+        benchmark = run(str(SRC / "bench"), str(archive / "data"), str(archive / "index"), "300")
         require_success(benchmark, "bench on a fresh sample archive")
         if "Queries/sec (QPS)" not in benchmark.stdout:
             raise RuntimeError(f"bench did not report throughput:\n{benchmark.stdout}")
+        # Assert the miss line explicitly rather than leaning on the exit code
+        # alone: if the counter were ever dropped, bench would go back to exiting
+        # 0 while measuring nothing, and require_success could not tell.
+        if "Lookup misses" not in benchmark.stdout:
+            raise RuntimeError(f"bench stopped accounting for misses:\n{benchmark.stdout}")
+        miss_line = next(l for l in benchmark.stdout.splitlines() if "Lookup misses" in l)
+        if miss_line.split("|")[2].strip() != "0":
+            raise RuntimeError(f"bench reported lookup misses:\n{benchmark.stdout}")
 
         # MappedShard deliberately accepts legacy calendar-invalid dates so a
         # historical archive can still be served. verify is the separate
@@ -84,9 +96,33 @@ def main():
         if "has invalid crawl date 20030229" not in invalid_date.stdout:
             raise RuntimeError(f"verify did not report the invalid index date:\n{invalid_date.stdout}")
 
+        check_bench_counts_misses(fault_copy(pristine, tmp, "bench-no-data"))
         check_invalid_record_date(fault_copy(pristine, tmp, "record-date"))
         check_invalid_record_payload_size(fault_copy(pristine, tmp, "record-payload"))
     print("PASS: archive verify success/failure paths and benchmark smoke test")
+
+
+def check_bench_counts_misses(archive):
+    """Positive control for bench's miss counter (T-012).
+
+    Asserting "Lookup misses | 0" on a healthy archive proves nothing: gut the
+    counter and misses stays 0, the line still prints, and the assertion still
+    passes. It is the same vacuous-assertion trap this repo keeps finding, and it
+    was in the first version of this check.
+
+    So force misses to exist. Deleting the data files leaves the index intact, so
+    every lookup still resolves through the shard and then fails to read its
+    record — get_page returns {} and the URL no longer matches. bench must count
+    those and exit non-zero. With the counter removed, this check goes red.
+    """
+    for record in (archive / "data").rglob("*.dat"):
+        record.unlink()
+    result = run(str(SRC / "bench"), str(archive / "data"), str(archive / "index"), "100")
+    if result.returncode == 0:
+        raise RuntimeError(f"bench passed an archive whose records are all gone:\n{result.stdout}")
+    miss_line = next((l for l in result.stdout.splitlines() if "Lookup misses" in l), "")
+    if not miss_line or miss_line.split("|")[2].strip() == "0":
+        raise RuntimeError(f"bench did not count the misses it hit:\n{result.stdout}")
 
 
 def check_invalid_record_date(archive):
