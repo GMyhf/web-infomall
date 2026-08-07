@@ -3,6 +3,82 @@
 > 只有 Claude 写这个文件。倒序追加：改了什么、哪里没把握、想让 Codex 重点看哪里。
 > 「没把握」比「做了什么」值钱——diff 能看出后者，看不出前者。
 
+## 2026-08-07 · T-013 任务书（交给 Codex）：把概率兜底换成确定性覆盖
+
+人指派 T-013 给你。下面是我替你做完的侦察，以及我希望你**别顺着我框架走**的地方。
+
+### 靶子
+
+`find_first`（`common.h:288`）——整条查询路径的核心，`get_page` / `get_versions` /
+前缀搜索三处都走它。九行代码：
+
+```cpp
+int lo = 0, hi = static_cast<int>(count);
+while (lo < hi) {
+    int mid = (lo + hi) / 2;
+    if (entries[mid].url_hash < hash) lo = mid + 1;
+    else hi = mid;
+}
+return (lo < (int)count && entries[lo].url_hash == hash) ? &entries[lo] : nullptr;
+```
+
+### 我侦察到的四条事实（省你时间，请自己复核）
+
+1. **手搭夹具最大只有 2 条 entry。** `test_core.cpp` 里 `make_host_block` 全部 6 处调用，
+   `entry_count` 分别是 2 / 1 / 1 / 1 / 2 / 1。**二分查找从没真正递归过。**
+2. **两条变异对现有 495 项完全不可见**：`hi = mid - 1`、`while (lo + 1 < hi)`。
+   我实测过，`test_core` 全绿。**只有 `bench` 的随机抽样能抓到**（126/500、136/500）。
+3. **随机抽样是概率兜底，不是覆盖。** T-012 让闸门有了兜底，但换个抽样规模就可能漏——
+   我在 T-011 里就撞见过一次：`lo = 1` 那条变异在深归档上 **0 misses**，
+   纯粹因为随机抽样没抽中第 0 条。**这条任务的意义就是把那份运气去掉。**
+4. **`get_versions` 只在一处覆盖到 2 个版本**（`test_core.cpp:732`，走真实 indexer 的
+   roundtrip 测试）。
+
+### 为什么「同 URL 多版本」是这条任务的另一半
+
+这个函数叫 `find_first` 而不是 `find`，是有原因的：**同一个 URL 的多次抓取，
+`url_hash` 完全相同**，它们在 block 里连成一段（按 `crawl_date DESC` 排）。
+`find_first` 必须返回这一段的**第一条**，调用方才能用
+`while (block[idx].url_hash == hash)` 往后扫完整段。
+
+**返回段中间的任何一条，`get_page` 仍然可能"看起来对"**（它扫到的那部分里若含目标 URL 就返回了），
+但 `get_versions` 会少算版本——而"某个 URL 有几个历史版本"正是这个项目的核心功能。
+
+所以这一半的判据是：**造一个 URL 有 K 个版本（K 足够大，比如 20+）的 block，
+断言 `get_versions` 返回 K 条、日期齐全且有序**。
+构造上很简单——同 URL 不同 `crawl_date`，`url_hash` 自然相同，你不需要伪造哈希。
+
+### 建议的判据（这是我的框架，不是要求）
+
+- **确定性**：造一个 N 条 entry 的 block（N 取几百量级即可，`test_core` 现在 0.9 秒，别撑爆它），
+  **对每一条**断言 `get_page(url).url == url`。不抽样，全查。
+- **边界**：第 0 条、第 N-1 条、以及不在 block 里的 URL（必须返回未找到而不是相邻条目）。
+- **多版本**：如上，K 个版本全部取回。
+- **硬要求**：每条新断言做变异自检，**并先 `diff -q` 确认变异真的生效**
+  （见 `collab/README.md` 硬约束第二条——那条是我上一轮踩出来的）。
+  至少要能抓住 `hi = mid - 1` 和 `while (lo + 1 < hi)` 这两条。
+
+### 你会遇到的实际工作量在哪
+
+不在断言，在**构造**。`write_v2_shard` 要求 entry 按 `url_hash` 排序、
+`url_offset` 指向 url_pool 里对应的切片。造 N 条就得：生成 N 个 URL → 算 hash → 按 hash 排序
+→ **按排序后的顺序**拼 pool 并回填每条的 `url_offset`。
+现有 `make_v2_entry` 不替你做这件事（它只接受你算好的 offset），
+`test_v2_shard_validation_and_legacy_dates` 里那段 `if (ordered_entries[1].url_hash < ...) swap`
+就是这个问题在 N=2 时的手工版。**建议把这段抽成一个 helper**——T-006 的红队夹具和
+将来任何深 block 测试都会用到它。
+
+### 我想被质疑的地方
+
+- **N 取几百是我拍的。** 我的依据只是「`test_core` 现在 0.9 秒，别让它变慢太多」。
+  如果你算出更小的 N 就足以让二分递归到足够深度（log2(N) 层），用更小的，并说明理由。
+- **我可能又把靶子选窄了。** 我盯着 `find_first`，是因为我有它逃逸的实测证据。
+  但 `find_host_range`（`query.cpp`，host 层二分）同样是二分查找，
+  同样只被小夹具覆盖过——如果你认为它更值得先补，推翻我。
+- **T-011 的教训请你也带着**：我上轮"更深 = 覆盖更多"的直觉是错的。
+  造大 block 之前，先想清楚**它到底让哪一条判据从概率变成确定**，
+  别造一个大而无用的夹具。
+
 ## 2026-08-07 · 我提的方向被自己的实验否掉了，但路上捡到一个真缺口
 
 人让我按我提议的方向做（把真实形状的 `dat111` 接进闸门）。**做完实验，这个提议不成立。**
