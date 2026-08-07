@@ -389,6 +389,79 @@ void test_corrupt_shard(TestContext& test, const std::string& root) {
     CHECK(test, shard.data == nullptr);
 }
 
+// T-007: a calendar-invalid date makes a page half-visible, and both halves are
+// deliberate. It is counted as existing (record_count, unique_url_count,
+// total_articles) because the page really is in the archive and really can be
+// replayed; it is excluded from every date-derived aggregate (date_min/date_max,
+// year_counts, the year histogram) because an impossible day has no bucket to go
+// in. Neither half had a test, so either could have flipped unnoticed.
+void test_invalid_date_aggregate_visibility(TestContext& test, const std::string& root) {
+    const std::string archive = root + "/invalid-date-aggregates";
+    const std::string index_dir = archive + "/index";
+    const std::string host = "halfvisible.example.test";
+    const std::string bad_url = "http://halfvisible.example.test/impossible";
+    const std::string good_url = "http://halfvisible.example.test/ordinary";
+    const std::string title = "t";
+    const std::string body = "b";
+    std::filesystem::create_directories(index_dir);
+    std::filesystem::create_directories(archive + "/data/200302");
+    std::filesystem::create_directories(archive + "/data/200401");
+
+    auto size_of = [&](const std::string& url) {
+        return static_cast<uint16_t>(ArticleRecord::HEADER_SIZE + url.size() +
+                                     title.size() + body.size());
+    };
+    CHECK(test, write_uncompressed_article(archive + "/data/200302/data_0001.dat",
+                                           bad_url, 20030229, title, body));
+    CHECK(test, write_uncompressed_article(archive + "/data/200401/data_0001.dat",
+                                           good_url, 20040115, title, body));
+
+    // Entries must stay sorted by url_hash within the host block, so order the
+    // pair by hash rather than by which one is interesting.
+    UrlIndexEntry bad_entry = make_v2_entry(bad_url, 20030229, 0, size_of(bad_url));
+    UrlIndexEntry good_entry = make_v2_entry(good_url, 20040115,
+                                             static_cast<uint32_t>(bad_url.size()),
+                                             size_of(good_url));
+    std::string pool = bad_url + good_url;
+    std::vector<UrlIndexEntry> entries = {bad_entry, good_entry};
+    if (entries[1].url_hash < entries[0].url_hash) {
+        std::swap(entries[0], entries[1]);
+        pool = good_url + bad_url;
+        entries[0].url_offset = 0;
+        entries[1].url_offset = static_cast<uint32_t>(pool.size() - bad_url.size());
+        if (entries[0].crawl_date == 20040115)
+            entries[1].url_offset = static_cast<uint32_t>(good_url.size());
+    }
+    const std::vector<HostBlock> hosts = {make_host_block(host, 0, 2)};
+    const int sid = shard_for_host(host);
+    char shard_name[32];
+    snprintf(shard_name, sizeof(shard_name), "/url_%02d.idx", sid);
+    CHECK(test, write_v2_shard(index_dir + shard_name, hosts, entries, pool));
+
+    QueryEngine query(archive + "/data", index_dir);
+    CHECK(test, query.init());
+
+    // Counted half: the impossible-dated page exists and is served.
+    const auto summary = query.get_host_summary(host);
+    CHECK(test, summary.record_count == 2);
+    CHECK(test, summary.unique_url_count == 2);
+    CHECK(test, query.get_page(bad_url).url == bad_url);
+
+    // Date-derived half: it contributes to none of it.
+    CHECK(test, summary.date_min == 20040115 && summary.date_max == 20040115);
+    CHECK(test, summary.year_counts.size() == 1);
+    CHECK(test, summary.year_counts.count(2004) == 1 && summary.year_counts.at(2004) == 1);
+    CHECK(test, summary.year_counts.count(2003) == 0);
+
+    uint32_t total_articles = 0, total_urls = 0, date_min = 0, date_max = 0;
+    query.get_stats(total_articles, total_urls, date_min, date_max);
+    CHECK(test, total_articles == 2);
+    CHECK(test, date_min == 20040115 && date_max == 20040115);
+
+    const auto years = query.get_year_distribution();
+    CHECK(test, years.size() == 1 && years[0].year == 2004 && years[0].count == 1);
+}
+
 void test_v2_shard_validation_and_legacy_dates(TestContext& test, const std::string& root) {
     const std::string fixture = root + "/v2-shard-fixture";
     std::filesystem::create_directories(fixture);
@@ -690,6 +763,7 @@ int main() {
         test_truncated_store_append(test, temp.path());
         test_corrupt_shard(test, temp.path());
         test_v2_shard_validation_and_legacy_dates(test, temp.path());
+        test_invalid_date_aggregate_visibility(test, temp.path());
         test_corrupt_input_red_team(test, temp.path());
         test_empty_shard_compatibility(test, temp.path());
         test_query_index_roundtrip(test, temp.path());

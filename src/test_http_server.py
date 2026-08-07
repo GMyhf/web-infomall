@@ -154,7 +154,14 @@ def main():
     with tempfile.TemporaryDirectory(prefix="web-infomall-http-test-") as tmp:
         archive = Path(tmp) / "archive"
         loaded = subprocess.run(
-            [str(SRC / "load"), str(SAMPLE_DATA), str(archive), "--files", "0"],
+            # --max 100: this suite tests HTTP protocol behaviour, not archive
+            # size — no assertion below depends on how many articles exist. The
+            # full 1000-article sample costs 45s to load because dat0 is a
+            # shuffled excerpt spanning 111 month directories and DataStore
+            # fsyncs the file and its parent on every month change (T-010);
+            # 100 articles cost 6.6s and serve every route the same way.
+            [str(SRC / "load"), str(SAMPLE_DATA), str(archive), "--files", "0",
+             "--max", "100"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
