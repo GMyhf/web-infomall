@@ -82,6 +82,67 @@ std::string make_incompressible_body(size_t size) {
     return body;
 }
 
+bool write_v2_shard(const std::string& path, const std::vector<HostBlock>& hosts,
+                    const std::vector<UrlIndexEntry>& entries, const std::string& url_pool) {
+    ShardFileHeader header = {};
+    header.magic = SHARD_MAGIC;
+    header.entry_count = static_cast<uint32_t>(entries.size());
+    header.host_count = static_cast<uint32_t>(hosts.size());
+    header.url_pool_size = static_cast<uint32_t>(url_pool.size());
+
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    if (!hosts.empty())
+        output.write(reinterpret_cast<const char*>(hosts.data()),
+                     static_cast<std::streamsize>(hosts.size() * sizeof(HostBlock)));
+    if (!entries.empty())
+        output.write(reinterpret_cast<const char*>(entries.data()),
+                     static_cast<std::streamsize>(entries.size() * sizeof(UrlIndexEntry)));
+    output.write(url_pool.data(), static_cast<std::streamsize>(url_pool.size()));
+    return output.good();
+}
+
+HostBlock make_host_block(const std::string& host, uint32_t first_entry, uint32_t entry_count) {
+    HostBlock block = {};
+    strncpy(block.host, host.c_str(), sizeof(block.host) - 1);
+    block.first_entry = first_entry;
+    block.entry_count = entry_count;
+    return block;
+}
+
+UrlIndexEntry make_v2_entry(const std::string& url, uint32_t crawl_date,
+                             uint32_t url_offset, uint16_t record_size = 0) {
+    UrlIndexEntry entry = {};
+    entry.url_hash = url_hash(url);
+    entry.crawl_date = crawl_date;
+    entry.record_size = record_size;
+    entry.url_len = static_cast<uint16_t>(url.size());
+    entry.url_offset = url_offset;
+    return entry;
+}
+
+bool write_uncompressed_article(const std::string& path, const std::string& url,
+                                uint32_t crawl_date, const std::string& title,
+                                const std::string& body) {
+    ArticleRecord record = {};
+    record.magic = ARTICLE_MAGIC;
+    record.crawl_date = crawl_date;
+    record.url_len = static_cast<uint32_t>(url.size());
+    record.title_len = static_cast<uint32_t>(title.size());
+    record.body_compr_len = static_cast<uint32_t>(body.size());
+    record.body_orig_len = static_cast<uint32_t>(body.size());
+    record.record_size = ArticleRecord::HEADER_SIZE + record.url_len + record.title_len +
+                         record.body_compr_len;
+    record.mini_hash = mini_hash(url);
+
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(&record), sizeof(record));
+    output.write(url.data(), static_cast<std::streamsize>(url.size()));
+    output.write(title.data(), static_cast<std::streamsize>(title.size()));
+    output.write(body.data(), static_cast<std::streamsize>(body.size()));
+    return output.good();
+}
+
 void test_dates_and_tokenizer(TestContext& test) {
     CHECK(test, is_leap_year(2000));
     CHECK(test, !is_leap_year(1900));
@@ -305,6 +366,110 @@ void test_corrupt_shard(TestContext& test, const std::string& root) {
     CHECK(test, shard.data == nullptr);
 }
 
+void test_v2_shard_validation_and_legacy_dates(TestContext& test, const std::string& root) {
+    const std::string fixture = root + "/v2-shard-fixture";
+    std::filesystem::create_directories(fixture);
+    const std::string alpha_url = "http://alpha.example.test/a";
+    const std::string zeta_url = "http://zeta.example.test/z";
+    const std::string pool = alpha_url + zeta_url;
+    std::vector<HostBlock> hosts = {
+        make_host_block("alpha.example.test", 0, 1),
+        make_host_block("zeta.example.test", 1, 1),
+    };
+    std::vector<UrlIndexEntry> entries = {
+        make_v2_entry(alpha_url, 20240101, 0),
+        make_v2_entry(zeta_url, 20240102, static_cast<uint32_t>(alpha_url.size())),
+    };
+
+    const std::string valid_path = fixture + "/valid.idx";
+    CHECK(test, write_v2_shard(valid_path, hosts, entries, pool));
+    { MappedShard shard; CHECK(test, shard.open(valid_path.c_str())); }
+
+    // A calendar-invalid legacy date is intentionally serviceable when every
+    // binary-layout invariant remains valid. The query must preserve it rather
+    // than silently restoring the old MappedShard::open rejection.
+    const std::string archive = root + "/legacy-date-archive";
+    const std::string data_dir = archive + "/data/200302";
+    const std::string index_dir = archive + "/index";
+    std::filesystem::create_directories(data_dir);
+    std::filesystem::create_directories(index_dir);
+    const std::string legacy_url = "http://legacy.example.test/page";
+    const std::string title = "legacy title";
+    const std::string body = "legacy body";
+    const uint16_t record_size = static_cast<uint16_t>(ArticleRecord::HEADER_SIZE +
+        legacy_url.size() + title.size() + body.size());
+    CHECK(test, write_uncompressed_article(data_dir + "/data_0001.dat", legacy_url,
+                                           20030229, title, body));
+    std::vector<HostBlock> legacy_hosts = {make_host_block("legacy.example.test", 0, 1)};
+    std::vector<UrlIndexEntry> legacy_entries = {
+        make_v2_entry(legacy_url, 20030229, 0, record_size),
+    };
+    const std::string legacy_path = index_dir + "/url_" +
+        (shard_for_host("legacy.example.test") < 10 ? "0" : "") +
+        std::to_string(shard_for_host("legacy.example.test")) + ".idx";
+    CHECK(test, write_v2_shard(legacy_path, legacy_hosts, legacy_entries, legacy_url));
+    {
+        MappedShard shard;
+        const bool opened = shard.open(legacy_path.c_str());
+        CHECK(test, opened);
+        if (opened) CHECK(test, shard.entries[0].crawl_date == 20030229);
+    }
+    QueryEngine legacy_query(archive + "/data", index_dir);
+    CHECK(test, legacy_query.init());
+    const auto legacy_page = legacy_query.get_page(legacy_url);
+    CHECK(test, legacy_page.valid);
+    CHECK(test, legacy_page.date == 20030229);
+    CHECK(test, legacy_page.title == title);
+    const auto legacy_versions = legacy_query.get_versions(legacy_url);
+    CHECK(test, legacy_versions.size() == 1 && legacy_versions[0].date == 20030229);
+
+    // Each mutation starts from the same known-good layout, so a rejection is
+    // evidence for that exact invariant rather than an incidental malformed file.
+    auto bad_entries = entries;
+    bad_entries[0].url_offset = static_cast<uint32_t>(pool.size());
+    const std::string bad_offset = fixture + "/bad-offset.idx";
+    CHECK(test, write_v2_shard(bad_offset, hosts, bad_entries, pool));
+    { MappedShard shard; CHECK(test, !shard.open(bad_offset.c_str())); }
+
+    auto unsorted_hosts = hosts;
+    std::swap(unsorted_hosts[0], unsorted_hosts[1]);
+    const std::string bad_hosts = fixture + "/bad-host-order.idx";
+    CHECK(test, write_v2_shard(bad_hosts, unsorted_hosts, entries, pool));
+    { MappedShard shard; CHECK(test, !shard.open(bad_hosts.c_str())); }
+
+    const std::string first_url = "http://ordered.example.test/a";
+    const std::string second_url = "http://ordered.example.test/b";
+    std::vector<UrlIndexEntry> ordered_entries = {
+        make_v2_entry(first_url, 20240101, 0),
+        make_v2_entry(second_url, 20240102, static_cast<uint32_t>(first_url.size())),
+    };
+    if (ordered_entries[1].url_hash < ordered_entries[0].url_hash)
+        std::swap(ordered_entries[0], ordered_entries[1]);
+    const std::string ordered_pool = first_url + second_url;
+    std::vector<HostBlock> ordered_hosts = {make_host_block("ordered.example.test", 0, 2)};
+    const std::string ordered_path = fixture + "/ordered.idx";
+    CHECK(test, write_v2_shard(ordered_path, ordered_hosts, ordered_entries, ordered_pool));
+    { MappedShard shard; CHECK(test, shard.open(ordered_path.c_str())); }
+    std::swap(ordered_entries[0], ordered_entries[1]);
+    const std::string bad_order = fixture + "/bad-entry-order.idx";
+    CHECK(test, write_v2_shard(bad_order, ordered_hosts, ordered_entries, ordered_pool));
+    { MappedShard shard; CHECK(test, !shard.open(bad_order.c_str())); }
+
+    auto bad_ranges = hosts;
+    bad_ranges[0].first_entry = 2;
+    const std::string bad_range = fixture + "/bad-host-range.idx";
+    CHECK(test, write_v2_shard(bad_range, bad_ranges, entries, pool));
+    { MappedShard shard; CHECK(test, !shard.open(bad_range.c_str())); }
+
+    const std::string padded = fixture + "/padded.idx";
+    CHECK(test, write_v2_shard(padded, hosts, entries, pool));
+    const char trailing = 'x';
+    std::ofstream append(padded, std::ios::binary | std::ios::app);
+    append.write(&trailing, 1);
+    append.close();
+    { MappedShard shard; CHECK(test, !shard.open(padded.c_str())); }
+}
+
 void test_empty_shard_compatibility(TestContext& test, const std::string& root) {
     const std::string archive = root + "/empty-shard-archive";
     const std::string index_dir = archive + "/index";
@@ -413,6 +578,7 @@ int main() {
         test_uncreatable_store(test, temp.path());
         test_truncated_store_append(test, temp.path());
         test_corrupt_shard(test, temp.path());
+        test_v2_shard_validation_and_legacy_dates(test, temp.path());
         test_empty_shard_compatibility(test, temp.path());
         test_query_index_roundtrip(test, temp.path());
     } catch (const std::exception& error) {

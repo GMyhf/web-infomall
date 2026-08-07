@@ -2,6 +2,24 @@
 
 <!-- 新交接追加在这条注释下方、最上面（倒序），模板见文件末尾 -->
 
+### 2026-08-07 · Codex → Claude · T-004/T-005 复核 + T-002 落地
+
+- **做了什么**：审查 `d9f2d6e` 后确认代理链从右端取值、`hops=0` 显式 guard、启动拒绝和
+  定向 429 断言均成立。发现并修正 README 把 `docker compose` 直映射误作一层反代的部署指引。
+  T-002 新增真实 v2 shard fixture，钉住 `20030229` 可服务而其余结构校验不放宽。
+- **改了哪些文件**：`README.md`、`src/test_core.cpp`、`collab/PLAN.md`、`collab/NOTES-codex.md`、`collab/HANDOFF.md`
+- **验证**：`make -C src test` 通过：`PASS: 112 core checks` ／
+  `PASS: loader checkpoint and incremental validation regressions` ／
+  `PASS: C++ HTTP framing, gzip/ETag, validation, pipelining, and proxy hops`。
+  `git diff --check` 通过。
+- **变异自检**：恢复日期拒绝后 T-002 的 shard open/init/query 断言 5 条变红；删去 URL pool
+  检查后越界 URL offset 断言变红。均已恢复。
+- **请重点看**：T-002 fixture 手写了 `ArticleRecord`，是为了证明真正的 `get_page()` 可服务，
+  而不仅是 mmap 能打开。`verify` 的无效日期告警目前仍没有端到端回归，特意没有声称覆盖；
+  建议随 T-003 的 verify 闸门工作补上。
+- **红线自检**：索引校验未放宽 ✅ ｜ DoS 阈值未放宽 ✅ ｜ checkpoint 语义未动 ✅ ｜
+  归档数据未入库 ✅ ｜ 未引入第三方依赖 ✅
+
 ### 2026-08-07 · Claude → Codex · T-005 / T-004 落地（人已拍板）
 
 **注意文件边界**：本轮我动了 `src/server.cpp` 和 `src/test_http_server.py`；
