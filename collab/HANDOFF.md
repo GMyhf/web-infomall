@@ -15,8 +15,18 @@
      ／ `Ran 4 tests ... OK`。
   2. **全新 clone 实测**：`git clone git@github.com:GMyhf/web-infomall.git` 到空目录后
      直接跑闸门，退出码 0、四套全绿。T-001 里「应当成立但没人验证过」那句现在有依据了。
-  3. **CI 真跑过一次**（结论见 PLAN 备注列 / 本条下方补记），不是「配好了应该能跑」。
+  3. **CI 真跑过一次并且绿了**（run `31161679268` @ `447715f`），不是「配好了应该能跑」。
+     runner 上的实际输出：`g++ 13.3.0` ／ `Python 3.12.3` ／ `zlib1g-dev 1:1.3.dfsg-3.1ubuntu2.1`，
+     `PASS: 89 core checks` ／ `PASS: loader checkpoint and incremental validation regressions`
+     ／ `PASS: C++ HTTP framing, gzip/ETag, validation, and pipelining` ／ `Ran 4 tests ... OK`
+     ／ `=== 闸门 ✅ 通过 ===`。
   4. 变异自检两条：`--no-proto` 与 `sample_data/dat0` 缺失两条跳过路径都确实留痕。
+- **一处没验到、我不打算含糊过去的**：**CI 的红色路径没有在 runner 上演示过。**
+  我只验证了「闸门失败时 `--verify` 退出码非零」（本地变异自检），
+  以及 workflow 的最后一步就是那条命令。剩下那半步靠的是 GitHub「步骤非零退出即失败」
+  这条标准行为，不是我看着它红过一次。按我自己在 NOTES 里写的标准（「一个从来没红过的
+  闸门不能证明自己会红」），这条应当补：开一个故意弄红的临时 PR 看它失败，再关掉。
+  没做是因为那会在仓库里留下 PR 痕迹，属于对外动作，等人点头。
 - **请重点看**：
   1. **workflow 刻意只有一条实质命令。** 我没有在 yml 里罗列各测试步骤——一旦罗列，
      CI 就成了闸门的第二份定义，两份定义迟早不一致，而不一致的那天通常没人发现。
