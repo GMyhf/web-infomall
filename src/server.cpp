@@ -88,6 +88,24 @@ struct Logger {
 #define LOG_WRN(...) Logger::log(LOG_WRN, __VA_ARGS__)
 #define LOG_ERR(...) Logger::log(LOG_ERR, __VA_ARGS__)
 
+// ── Trusted proxy configuration ──────────────────────────────
+//
+// How many reverse proxies sit between the client and this server. It decides
+// which entry of X-Forwarded-For may be believed, and nothing else — no routing,
+// no authentication depends on it.
+//
+// 0  = trust nobody. The rate-limit key is always the peer address, which the
+//      kernel observed and a client cannot forge. Correct when `serve` is
+//      exposed directly.
+// N>0 = the last N entries of the chain were written by proxies we operate.
+//
+// The default is 1 (decided 2026-08-07, see collab/PLAN.md Decision Log). The
+// cost is written down there and warned about at startup: with N>0 and no proxy
+// actually in front, any client can forge X-Forwarded-For and land in a fresh
+// rate-limit bucket on every request, which turns rate limiting off.
+static constexpr uint32_t MAX_TRUSTED_PROXY_HOPS = 8;
+static uint32_t g_trusted_proxy_hops = 1;
+
 // ── Simple Rate Limiter (per-IP, best-effort) ────────────────
 
 struct RateLimiter {
@@ -488,6 +506,7 @@ struct HttpRequest {
     bool has_message_body = false;
     bool valid = false;
     std::string etag_if_none_match;
+    std::string forwarded_for;
 };
 
 static std::string trim_ascii(std::string value) {
@@ -496,6 +515,52 @@ static std::string trim_ascii(std::string value) {
     size_t end = value.size();
     while (end > begin && (value[end - 1] == ' ' || value[end - 1] == '\t')) end--;
     return value.substr(begin, end - begin);
+}
+
+// Resolve the address to bill this request to.
+//
+// The chain is [XFF entries left-to-right..., peer]. The peer is the only hop we
+// observed ourselves, so it is the most trustworthy and sits at the right end;
+// everything further left was merely asserted by whoever came before. With `hops`
+// trusted proxies in front, the real client sits `hops` positions left of the end:
+// one proxy appends the address it saw, so that address is the last XFF entry.
+//
+// Counting from the RIGHT is the whole point. Taking the leftmost entry — the
+// obvious reading of "the client comes first in X-Forwarded-For" — hands the key
+// straight to the client, because the client writes that entry. Counting from the
+// right means a forged prefix only adds entries that get skipped over.
+static uint32_t resolve_client_key(const std::string& forwarded_for, uint32_t peer_addr) {
+    if (g_trusted_proxy_hops == 0 || forwarded_for.empty()) return peer_addr;
+
+    // Right-to-left scan: only the (hops)-th entry from the end matters, so a
+    // header with a thousand forged entries costs no more than one with a single
+    // entry.
+    // `remaining > 0` is load-bearing, not decoration. Without it, hops == 0
+    // reaches `--remaining` at zero, wraps to SIZE_MAX and only falls back to the
+    // peer because the scan runs off the left end — correct by accident, and
+    // silently wrong the day this counter becomes signed or the loop is
+    // restructured. Two independent guards, both explicit.
+    size_t remaining = g_trusted_proxy_hops;
+    size_t end = forwarded_for.size();
+    while (end > 0 && remaining > 0) {
+        size_t comma = forwarded_for.rfind(',', end - 1);
+        size_t first = (comma == std::string::npos) ? 0 : comma + 1;
+        if (--remaining == 0) {
+            std::string entry = trim_ascii(forwarded_for.substr(first, end - first));
+            struct in_addr parsed;
+            // Anything unreadable as IPv4 — an IPv6 literal, "unknown", an
+            // obfuscated node identifier, plain garbage — falls back to the peer.
+            // Keying on an address we verified beats keying on a string we could
+            // not parse.
+            if (inet_pton(AF_INET, entry.c_str(), &parsed) == 1) return parsed.s_addr;
+            return peer_addr;
+        }
+        if (comma == std::string::npos) break;
+        end = comma;
+    }
+    // Chain shorter than the configured hop count: this request did not traverse
+    // the expected proxy topology, so nothing in the header is worth believing.
+    return peer_addr;
 }
 
 static std::string lowercase_header(std::string value) {
@@ -644,6 +709,12 @@ static HttpRequest parse_request(const char* data, size_t len) {
         } else if (name == "if-none-match") {
             if (!req.etag_if_none_match.empty()) req.etag_if_none_match += ',';
             req.etag_if_none_match += value;
+        } else if (name == "x-forwarded-for") {
+            // Repeated X-Forwarded-For headers are equivalent to one comma-joined
+            // list, and order matters: the chain must stay left-to-right so the
+            // hop count is counted from the right end.
+            if (!req.forwarded_for.empty()) req.forwarded_for += ',';
+            req.forwarded_for += value;
         }
         else if (name == "connection") {
             req.connection_keep_alive = req.connection_keep_alive ||
@@ -1923,10 +1994,21 @@ static bool handle_request(QueryEngine& qe, int csock, RateLimiter& limiter,
     struct sockaddr_in peer;
     socklen_t plen = sizeof(peer);
     if (getpeername(csock, (sockaddr*)&peer, &plen) == 0) {
-        if (limiter.check(peer.sin_addr.s_addr)) {
+        uint32_t client_key = resolve_client_key(req.forwarded_for, peer.sin_addr.s_addr);
+        if (limiter.check(client_key)) {
             char peer_ip[INET_ADDRSTRLEN] = {};
             inet_ntop(AF_INET, &peer.sin_addr, peer_ip, sizeof(peer_ip));
-            LOG_WRN("Rate limit exceeded for %s", peer_ip);
+            if (client_key != peer.sin_addr.s_addr) {
+                // Log both: the billed address comes from a header, so anyone
+                // reading the log needs to see which peer actually asserted it.
+                char client_ip[INET_ADDRSTRLEN] = {};
+                struct in_addr billed;
+                billed.s_addr = client_key;
+                inet_ntop(AF_INET, &billed, client_ip, sizeof(client_ip));
+                LOG_WRN("Rate limit exceeded for %s (via proxy %s)", client_ip, peer_ip);
+            } else {
+                LOG_WRN("Rate limit exceeded for %s", peer_ip);
+            }
             send_response(csock, 429, "text/plain; charset=utf-8",
                           "429 Too Many Requests\n", false, "", 0, false,
                           "Retry-After: 5\r\n");
@@ -2295,6 +2377,19 @@ static int run_server(QueryEngine& qe, int port) {
     ThreadPool pool(qe, limiter);
 
     printf("Server: http://localhost:%d  (workers=%d)\n", port, THREAD_POOL_SIZE);
+    // Say out loud which address rate limiting keys on. A misconfigured hop count
+    // does not fail, it silently stops limiting — so it has to be visible at
+    // startup rather than only in the docs.
+    if (g_trusted_proxy_hops == 0) {
+        printf("Rate limiting: keyed on the peer address (--trusted-proxy-hops 0)\n");
+    } else {
+        printf("Rate limiting: keyed on X-Forwarded-For, %u hop(s) from the right\n",
+               g_trusted_proxy_hops);
+        LOG_WRN("Trusting %u X-Forwarded-For hop(s): if this server is reachable "
+                "directly rather than only through your proxy, clients can forge the "
+                "header and bypass rate limiting. Pass --trusted-proxy-hops 0 when "
+                "exposing it directly.", g_trusted_proxy_hops);
+    }
     printf("Press Ctrl+C to stop.\n");
 
     while (server_running) {
@@ -2330,17 +2425,62 @@ static int run_server(QueryEngine& qe, int port) {
 
 // ── Entry ─────────────────────────────────────────────────────
 
+static void print_usage(const char* argv0) {
+    fprintf(stderr, "Usage: %s <data_dir> <index_dir> [port] [--trusted-proxy-hops N]\n", argv0);
+    fprintf(stderr, "  e.g. %s ../archive/data ../archive/index 8088\n", argv0);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  --trusted-proxy-hops N   Number of reverse proxies in front of this\n");
+    fprintf(stderr, "                           server (0-%u, default 1). Decides how far from\n",
+            MAX_TRUSTED_PROXY_HOPS);
+    fprintf(stderr, "                           the right end of X-Forwarded-For the rate-limit\n");
+    fprintf(stderr, "                           key is read. Use 0 when exposing this server\n");
+    fprintf(stderr, "                           directly: any other value lets clients forge the\n");
+    fprintf(stderr, "                           header and get a fresh rate-limit bucket.\n");
+}
+
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 4) {
-        fprintf(stderr, "Usage: %s <data_dir> <index_dir> [port]\n", argv[0]);
-        fprintf(stderr, "  e.g. %s ../archive/data ../archive/index 8088\n", argv[0]);
+    std::string data_dir, index_dir;
+    const char* port_arg = nullptr;
+    std::vector<std::string> positional;
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--trusted-proxy-hops") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "ERROR: --trusted-proxy-hops requires a value\n");
+                return 1;
+            }
+            const char* value = argv[++i];
+            char* hops_end = nullptr;
+            errno = 0;
+            long parsed = strtol(value, &hops_end, 10);
+            if (errno != 0 || !hops_end || *hops_end != '\0' || value[0] == '\0' ||
+                parsed < 0 || parsed > static_cast<long>(MAX_TRUSTED_PROXY_HOPS)) {
+                fprintf(stderr, "ERROR: --trusted-proxy-hops must be an integer from 0 to %u\n",
+                        MAX_TRUSTED_PROXY_HOPS);
+                return 1;
+            }
+            g_trusted_proxy_hops = static_cast<uint32_t>(parsed);
+        } else if (arg.rfind("--", 0) == 0) {
+            fprintf(stderr, "ERROR: unknown option %s\n", arg.c_str());
+            print_usage(argv[0]);
+            return 1;
+        } else {
+            positional.push_back(arg);
+        }
+    }
+
+    if (positional.size() < 2 || positional.size() > 3) {
+        print_usage(argv[0]);
         return 1;
     }
-    std::string data_dir = argv[1];
-    std::string index_dir = argv[2];
+    data_dir = positional[0];
+    index_dir = positional[1];
+    if (positional.size() > 2) port_arg = positional[2].c_str();
+
     char* port_end = nullptr;
-    long parsed_port = argc > 3 ? strtol(argv[3], &port_end, 10) : 8088;
-    if ((argc > 3 && (!port_end || *port_end != '\0')) ||
+    long parsed_port = port_arg ? strtol(port_arg, &port_end, 10) : 8088;
+    if ((port_arg && (!port_end || *port_end != '\0')) ||
         parsed_port < 1 || parsed_port > 65535) {
         fprintf(stderr, "ERROR: port must be an integer from 1 to 65535\n");
         return 1;

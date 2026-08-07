@@ -21,7 +21,7 @@ and `collab/README.md` before touching code**; claim a task in `PLAN.md` (sign i
 | `collab/review-input.md` | Generated per handoff by `tools/handoff.py`; **not versioned** |
 
 ```bash
-python3 tools/handoff.py --verify                        # the gate: make -C src test + py_compile + prototype regression
+python3 tools/handoff.py --verify                        # the gate: make -C src test + py_compile (prototype/ excluded)
 python3 tools/handoff.py --from claude --to codex        # generate the review package
 ```
 
@@ -52,17 +52,32 @@ On macOS the Makefile automatically adds the active SDK path when `xcrun` is ava
 ### Start C++ replay server
 
 ```bash
-./src/serve <data_dir> <index_dir> [port]
+./src/serve <data_dir> <index_dir> [port] [--trusted-proxy-hops N]
 ./src/serve archive/data archive/index 8088
+./src/serve archive/data archive/index 8088 --trusted-proxy-hops 0   # exposed directly
 ```
+
+`--trusted-proxy-hops N` (0-8, **default 1**) is how many reverse proxies you operate
+in front of this server. The rate-limit key is read N positions left of the right end
+of `[X-Forwarded-For entries..., TCP peer]`. Counting from the right is what makes it
+safe: the leftmost entry is written by the client. **Pass 0 when exposing the server
+directly** — otherwise anyone can forge the header and get a fresh rate-limit bucket
+per request, which turns rate limiting off. Unparseable entries and chains shorter
+than N fall back to the peer address.
+
 The server now uses a **4-worker thread pool** and supports **gzip compression** and **HTTP cache headers** (ETag, Last-Modified, Cache-Control, 304 Not Modified).
 
 ### Python prototype (Phase 1 — validation, no deps)
 
+**Archived and unmaintained** (T-004, decided 2026-08-07). It is excluded from the
+gate — nothing verifies it, and nothing will report it when it breaks. Run it from
+inside the directory; the modules import each other as siblings.
+
 ```bash
+cd prototype
 python3 load_data.py                          # Load dat0 only (~118K articles)
 python3 server.py                             # http://localhost:5000
-python3 -m unittest test_parser.py
+python3 -m unittest test_parser
 python3 test_server.py
 ```
 
@@ -156,15 +171,15 @@ char url_pool[url_pool_size]   (concatenated byte slices, each entry points via 
 
 | File | Role |
 |------|------|
-| `parser.py` | `ArticleParser` class — streaming `.dat` parser, GB18030→UTF-8 using Python codecs |
-| `store.py` | `ArchiveStore` class — SQLite storage with WAL mode, URL hash indexing, version tracking |
-| `server.py` | `ReplayHandler` — stdlib `HTTPServer`, routes: `/`, `/search`, `/replay`, `/calendar`, `/stats` |
-| `load_data.py` | Data loading pipeline using `ArticleParser` + `ArchiveStore` |
-| `test_parser.py` | Parser and multi-file loader regression tests |
+| `prototype/parser.py` | `ArticleParser` class — streaming `.dat` parser, GB18030→UTF-8 using Python codecs |
+| `prototype/store.py` | `ArchiveStore` class — SQLite storage with WAL mode, URL hash indexing, version tracking |
+| `prototype/server.py` | `ReplayHandler` — stdlib `HTTPServer`, routes: `/`, `/search`, `/replay`, `/calendar`, `/stats` |
+| `prototype/load_data.py` | Data loading pipeline using `ArticleParser` + `ArchiveStore` |
+| `prototype/test_parser.py` | Parser and multi-file loader regression tests |
 
 ### Templates directory
 
-Jinja2-style templates (`templates/*.html`) for a potential Flask/Jinja2-based server variant. The Python `server.py` embeds HTML inline (not using these templates); the C++ `server.cpp` embeds HTML as C string literals. Templates serve as reference layout/design.
+Jinja2-style templates (`templates/*.html`) for a potential Flask/Jinja2-based server variant. The archived Python `prototype/server.py` embeds HTML inline (not using these templates); the C++ `server.cpp` embeds HTML as C string literals. Templates serve as reference layout/design.
 
 ## RFC / encoding handling
 

@@ -2,6 +2,47 @@
 
 <!-- 新交接追加在这条注释下方、最上面（倒序），模板见文件末尾 -->
 
+### 2026-08-07 · Claude → Codex · T-005 / T-004 落地（人已拍板）
+
+**注意文件边界**：本轮我动了 `src/server.cpp` 和 `src/test_http_server.py`；
+你的 T-002 在 `src/test_core.cpp` / `src/query.cpp`，不重叠。`tools/handoff.py`
+我也动了（排除 `prototype/`），如果你也要改它，先说一声。
+
+- **做了什么**：
+  - **T-005**：新增 `--trusted-proxy-hops N`（0–8，默认 1）。限流键从
+    `[XFF 各条目（左→右）, TCP peer]` 链的**右端**往左数 N 位取。
+    非法取值拒绝启动；`N>0` 时启动打一条 `[WRN]` 说明伪造风险。
+    `Dockerfile` 的 `CMD` 显式传 `0`（该部署前面没有代理）。
+  - **T-004**：Python 原型移入 `prototype/`，自带 README 写明不维护，移出闸门；
+    排除会在闸门输出里留一行 `ℹ️`。
+- **改了哪些文件**：`src/server.cpp`、`src/test_http_server.py`、`Dockerfile`、
+  `tools/handoff.py`、`README.md`、`CLAUDE.md`、`prototype/*`（6 个文件 git mv + 新 README）、
+  `collab/PLAN.md`、`collab/NOTES-claude.md`、`collab/HANDOFF.md`
+- **验证**：闸门退出码 0。`PASS: 89 core checks` ／
+  `PASS: loader checkpoint and incremental validation regressions` ／
+  **`PASS: C++ HTTP framing, gzip/ETag, validation, pipelining, and proxy hops`**（本轮扩了这套）／
+  `ℹ️ prototype/ 已排除在闸门之外（6 个 .py）`。
+  **变异自检 4 条**（见 NOTES 表格）：取最左 ✅红、永远用 peer ✅红、去掉范围校验 ✅红、
+  `hops=0` 仍读 XFF ❌未红——**查明是等价变异**，不是漏测，但它暴露了实现依赖无符号下溢，
+  已改成显式双 guard。
+- **请重点看**：
+  1. **方向**：`resolve_client_key` 从右端数。取最左是这类代码最常见的错法，而且
+     正常流量下看不出来。我用「31 个伪造前缀请求必须落进同一个桶」钉住它——
+     **请确认这条断言真的只在方向正确时才成立**。
+  2. **我判「巧合正确」判重了吗**：`hops==0` 的 guard 原本靠无符号下溢才对，
+     我加了第二道显式 guard。如果你认为属于过度防御，说。
+  3. **我替人做了一个他没明确点头的决定**：`Dockerfile` 的 `CMD` 加 `0`。
+     人拍板的是二进制默认 1，我没动；但那个镜像前面没代理。理由写在 NOTES 第三节，
+     认为越界就回滚这一处。
+  4. **默认 1 的口子仍然挂着**：裸跑 `./src/serve` 不加参数的人只会收到一条 WRN，不会被拦。
+     这是人明确选择的取值，我照做并把代价写进了 Decision Log——**不是遗漏**。
+- **红线自检**：HTTP DoS 阈值未放宽 ✅（限流窗口/上限未动，只改了键的来源）｜
+  索引校验未动 ✅ ｜ 回放沙箱 CSP 未动 ✅ ｜ checkpoint 语义未动 ✅ ｜
+  输入解析走严格函数 ✅（`strtol` + 显式边界 + `inet_pton`，无新 `atoi`/`sscanf`）｜
+  归档数据未入库 ✅ ｜ 未引入第三方依赖 ✅
+- **下一步建议**：你的 T-002 不受影响，照原计划做。顺带一提：T-002 要写的
+  「构造合法 v2 shard」helper，和 T-006 红队会用同一个——写的时候留个通用接口。
+
 ### 2026-08-07 · Claude → Codex · 第一轮交叉审查：审 T-000/T-001，接手 T-002
 
 第一次真正的交接。请做两件事，顺序无所谓。

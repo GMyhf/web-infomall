@@ -94,6 +94,9 @@ make -C src
 ```bash
 ./src/serve archive/data archive/index 8088
 # 浏览器打开 http://localhost:8088
+
+# 直接对外暴露（没有反向代理）时，必须关掉对 X-Forwarded-For 的信任：
+./src/serve archive/data archive/index 8088 --trusted-proxy-hops 0
 ```
 
 ### 加载全量数据（1400万文章）
@@ -142,6 +145,25 @@ docker run -p 8088:8088 -v /path/to/archive:/archive:ro web-infomall
 
 服务器对每个客户端 IP 实施速率限制：5 秒滑动窗口内最多 30 次请求。超出限制返回 HTTP 429（Too Many Requests）以及 `Retry-After` 头部。速率限制状态基于内存计数器，服务重启后重置。
 
+#### 客户端 IP 从哪里来：`--trusted-proxy-hops N`
+
+`N` 是本服务前面**你自己运维的**反向代理数量，取值 0–8，**默认 1**。
+
+限流键从 `[X-Forwarded-For 各条目（左→右）, TCP peer]` 这条链的**右端**往左数 `N` 位取得。
+从右端数是关键：最左那条由客户端书写，谁都能伪造；从右端数意味着伪造的前缀只会被跳过。
+XFF 缺失、条目数少于 `N`、或该条目不是合法 IPv4（IPv6 字面量、`unknown`、乱码）时，
+一律回落到内核观测到的 TCP peer 地址。
+
+| 部署形态 | 取值 | 后果 |
+|---|---|---|
+| 直接暴露（`./src/serve` 对公网） | **必须 0** | 用默认值 1 时，任何人发一个伪造的 `X-Forwarded-For` 就能每次请求换一个限流桶——**限流等于关闭** |
+| 恰好一层自有反向代理（含 `docker compose` 常见形态） | 1（默认） | 正确：所有客户端不再塌缩成代理那一个 IP |
+| 两层自有代理（如 CDN → nginx） | 2 | — |
+
+`N > 0` 时服务器启动会打印一条 `[WRN]` 提醒这个风险；`N = 0` 时打印键为 peer 地址。
+取值非法（负数、超过 8、非整数）会**拒绝启动**，不会静默截断——
+这个参数配错的表现是限流悄悄失效，所以它不该被容忍。
+
 ### 结构化日志
 
 服务器所有日志输出采用统一格式：
@@ -157,11 +179,11 @@ docker run -p 8088:8088 -v /path/to/archive:/archive:ro web-infomall
 | 命令 | 说明 |
 |------|------|
 | `./src/load` | 数据加载流水线，支持 `--all`、`--files`、`--max`、`--incremental` |
-| `./src/serve` | 多线程 HTTP 回放服务器（线程池、gzip、缓存、限流） |
+| `./src/serve` | 多线程 HTTP 回放服务器（线程池、gzip、缓存、限流、`--trusted-proxy-hops`） |
 | `./src/verify` | 校验 shard 布局、记录 CRC-32 和精确 data 文件交叉引用 |
 | `./src/bench` | 性能基准测试，随机查询延迟百分位统计 |
 | `cd src && make test` | 解析器、核心逻辑、增量 checkpoint 与 C++ HTTP 回归套件 |
-| `python3 tools/handoff.py --verify` | 交接闸门：跑上面全套回归 + Python 语法检查 + 原型回归 |
+| `python3 tools/handoff.py --verify` | 交接闸门：跑上面全套回归 + Python 语法检查（`prototype/` 不在闸门内） |
 | `python3 tools/handoff.py --from claude --to codex` | 生成 `collab/review-input.md` 交给另一方 AI 审查 |
 
 ## 协作方式（Claude ⇄ Codex）
@@ -193,7 +215,8 @@ src/
 
 templates/         Jinja2 参考模板（实际 HTML 内嵌在 C++ 源码中）
 
-# 以下 Python 原型文件位于仓库根目录（Phase 1，已弃用）
+prototype/         Phase 1 Python 原型，**已归档、不维护、不参与闸门**
+  README.md        归档说明与运行方式（人拍板 2026-08-07）
   parser.py        备用 Python 解析器
   store.py         SQLite 存储 (小规模验证用)
   server.py        Python HTTP 服务器
@@ -201,7 +224,7 @@ templates/         Jinja2 参考模板（实际 HTML 内嵌在 C++ 源码中）
   test_parser.py   Python 解析与加载回归测试
   test_server.py   服务端冒烟测试
 
-  *** Python 原型已弃用，仅保留作参考。所有生产用途请使用 C++ Phase 2 系统。 ***
+  *** 所有生产用途请使用 C++ Phase 2 系统。prototype/ 的失效不会被任何机制发现。 ***
 ```
 
 ## Shard 文件布局 (v2)

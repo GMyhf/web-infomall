@@ -16,7 +16,7 @@
   --out <path>    输出路径，默认 collab/review-input.md
   --verify        附带运行闸门并把结果写进包里
   --stdout        打印到 stdout，不写文件
-  --no-proto      跳过已弃用的 Python 原型回归（只跑 C++ 闸门 + 语法检查）
+  --no-proto      保留参数：原型已归档出闸门，当前无实际效果
 
 无 --base/--range 时自动推断：工作区有未提交改动 → 对比 HEAD；否则 → HEAD~1..HEAD。
 只用 Python 标准库 + git + make，无第三方依赖。移植自 cs101.openjudge.cn/tools/handoff.py。
@@ -147,6 +147,8 @@ def read_open_items():
 
 
 def python_sources():
+    # prototype/ is deliberately absent: T-004 archived it as unmaintained, and a
+    # gate that keeps compiling it would quietly re-adopt it.
     dirs = [ROOT, ROOT / "src", ROOT / "tools"]
     files = sorted(
         {str(p.relative_to(ROOT)) for d in dirs if d.is_dir() for p in d.glob("*.py")}
@@ -155,29 +157,32 @@ def python_sources():
 
 
 def run_verify(skip_proto=False):
-    """跑闸门：C++ 全套回归 → Python 语法检查 → （可选）Python 原型回归。
+    """跑闸门：C++ 全套回归 → Python 语法检查。
 
     `make -C src test` 已经包含 test_parse / test_core / 加载器 checkpoint /
     C++ HTTP 端到端四套。它是本项目最硬的仲裁，放在第一步：后面的检查再绿，
     这一步红了交接就是红的。
+
+    prototype/ 不在闸门内（T-004），但排除会在输出里留一行，见下方注释。
     """
     py_files = python_sources()
     steps = [["make", "-C", "src", "test"], ["python3", "-m", "py_compile", *py_files]]
-    # Python 原型（Phase 1）已弃用，但测试还在仓库里且能跑；只在样例数据在位时跑。
-    # 它依赖 sample_data/dat0 —— 该文件已入库，所以全新 clone 上闸门同样成立（已实测）。
+
+    # T-004（人拍板 2026-08-07）：Phase 1 Python 原型显式归档到 prototype/，
+    # 不参与闸门——既不跑它的回归，也不做它的语法检查。
     #
-    # 跳过必须留痕：一个「条件满足才跑」的步骤在条件不满足时无声消失，读输出的人会把
-    # 「没跑」看成「跑过且没问题」。这正是闸门最容易骗人的形态，所以把跳过写进输出。
-    skip_note = ""
-    if skip_proto:
-        skip_note = "⏭️ Python 原型回归：按 --no-proto 跳过"
-    elif not (ROOT / "sample_data" / "dat0").is_file():
-        skip_note = (
-            "⚠️ Python 原型回归未运行：缺少 sample_data/dat0。"
-            "该文件本应随仓库入库——覆盖已经静默减少，先查它为什么不见了。"
+    # 但排除必须留痕。一个「不跑」的决定和一个「忘了跑」的事故在输出里长得一模一样，
+    # 而前者是决策、后者是缺陷；不写出来，半年后没人分得清是哪一个。
+    excluded_note = ""
+    proto_dir = ROOT / "prototype"
+    if proto_dir.is_dir():
+        count = len(sorted(proto_dir.glob("*.py")))
+        excluded_note = (
+            f"ℹ️ prototype/ 已排除在闸门之外（{count} 个 .py 未做回归也未做语法检查）。"
+            "人拍板归档为不维护，见 prototype/README.md 与 collab/PLAN.md Decision Log。"
         )
-    else:
-        steps.append(["python3", "-m", "unittest", "-v", "test_parser"])
+    if skip_proto:
+        excluded_note += "\n⏭️ --no-proto：本项目已无闸门内的原型步骤，该参数当前无实际效果。"
 
     outputs, ok = [], True
     for step in steps:
@@ -202,8 +207,8 @@ def run_verify(skip_proto=False):
         else:
             outputs.append(f"$ {label}\n❌ exit {proc.returncode}\n{body}")
             ok = False
-    if skip_note:
-        outputs.append(skip_note)
+    if excluded_note:
+        outputs.append(excluded_note)
     return ok, "\n\n".join(outputs)
 
 

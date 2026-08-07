@@ -35,4 +35,9 @@ EXPOSE 8088
 VOLUME ["/archive"]
 
 ENTRYPOINT ["serve"]
-CMD ["/archive/data", "/archive/index", "8088"]
+# --trusted-proxy-hops 0: this image publishes 8088 itself and docker-compose.yml
+# maps it straight to the host, so nothing in front writes X-Forwarded-For. Leaving
+# the binary's default of 1 here would only mean clients could forge the header and
+# get a fresh rate-limit bucket per request. Raise it to match your topology if you
+# put your own reverse proxy in front (see README, 速率限制).
+CMD ["/archive/data", "/archive/index", "8088", "--trusted-proxy-hops", "0"]
