@@ -143,6 +143,18 @@ bool write_uncompressed_article(const std::string& path, const std::string& url,
     return output.good();
 }
 
+// True when a failed open() left nothing behind. Worth a helper because the
+// interesting cases are the *late* failures: hosts/entries/url_pool are only
+// assigned once the layout checks pass, so a shard rejected for bad ordering or
+// an out-of-pool offset is the only kind that can leave them dangling into the
+// mapping fail() has already munmap'd. Truncated prefixes fail earlier, before
+// those fields are ever set, so they cannot exercise this on their own.
+bool shard_state_cleared(const MappedShard& shard) {
+    return shard.fd == -1 && shard.data == nullptr && shard.header == nullptr &&
+           shard.hosts == nullptr && shard.entries == nullptr &&
+           shard.url_pool == nullptr && shard.file_size == 0 && !shard.is_v2;
+}
+
 std::string read_file_bytes(const std::string& path) {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
@@ -447,13 +459,15 @@ void test_v2_shard_validation_and_legacy_dates(TestContext& test, const std::str
     bad_entries[0].url_offset = static_cast<uint32_t>(pool.size());
     const std::string bad_offset = fixture + "/bad-offset.idx";
     CHECK(test, write_v2_shard(bad_offset, hosts, bad_entries, pool));
-    { MappedShard shard; CHECK(test, !shard.open(bad_offset.c_str())); }
+    { MappedShard shard; CHECK(test, !shard.open(bad_offset.c_str()));
+      CHECK(test, shard_state_cleared(shard)); }
 
     auto unsorted_hosts = hosts;
     std::swap(unsorted_hosts[0], unsorted_hosts[1]);
     const std::string bad_hosts = fixture + "/bad-host-order.idx";
     CHECK(test, write_v2_shard(bad_hosts, unsorted_hosts, entries, pool));
-    { MappedShard shard; CHECK(test, !shard.open(bad_hosts.c_str())); }
+    { MappedShard shard; CHECK(test, !shard.open(bad_hosts.c_str()));
+      CHECK(test, shard_state_cleared(shard)); }
 
     const std::string first_url = "http://ordered.example.test/a";
     const std::string second_url = "http://ordered.example.test/b";
@@ -471,13 +485,15 @@ void test_v2_shard_validation_and_legacy_dates(TestContext& test, const std::str
     std::swap(ordered_entries[0], ordered_entries[1]);
     const std::string bad_order = fixture + "/bad-entry-order.idx";
     CHECK(test, write_v2_shard(bad_order, ordered_hosts, ordered_entries, ordered_pool));
-    { MappedShard shard; CHECK(test, !shard.open(bad_order.c_str())); }
+    { MappedShard shard; CHECK(test, !shard.open(bad_order.c_str()));
+      CHECK(test, shard_state_cleared(shard)); }
 
     auto bad_ranges = hosts;
     bad_ranges[0].first_entry = 2;
     const std::string bad_range = fixture + "/bad-host-range.idx";
     CHECK(test, write_v2_shard(bad_range, bad_ranges, entries, pool));
-    { MappedShard shard; CHECK(test, !shard.open(bad_range.c_str())); }
+    { MappedShard shard; CHECK(test, !shard.open(bad_range.c_str()));
+      CHECK(test, shard_state_cleared(shard)); }
 
     const std::string padded = fixture + "/padded.idx";
     CHECK(test, write_v2_shard(padded, hosts, entries, pool));
@@ -485,7 +501,8 @@ void test_v2_shard_validation_and_legacy_dates(TestContext& test, const std::str
     std::ofstream append(padded, std::ios::binary | std::ios::app);
     append.write(&trailing, 1);
     append.close();
-    { MappedShard shard; CHECK(test, !shard.open(padded.c_str())); }
+    { MappedShard shard; CHECK(test, !shard.open(padded.c_str()));
+      CHECK(test, shard_state_cleared(shard)); }
 }
 
 void test_corrupt_input_red_team(TestContext& test, const std::string& root) {
@@ -506,7 +523,12 @@ void test_corrupt_input_red_team(TestContext& test, const std::string& root) {
         CHECK(test, write_file_prefix(truncated_path, valid_bytes, size));
         MappedShard shard;
         CHECK(test, !shard.open(truncated_path.c_str()));
-        CHECK(test, shard.fd == -1 && shard.data == nullptr && shard.header == nullptr);
+        // All eight fields fail() clears, not just the three obvious ones.
+        // hosts/entries/url_pool are the ones that matter most: they point into
+        // the mapping fail() has already munmap'd, so if a failed open forgets
+        // them, a caller that ignores the return value dereferences freed pages.
+        // Kept as one CHECK so strengthening this does not inflate the count.
+        CHECK(test, shard_state_cleared(shard));
     }
 
     // Bit-level damage to the fields the parser relies on must also fail cleanly.

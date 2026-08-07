@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end checks for the archive verification and benchmark tools."""
 
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -23,11 +24,28 @@ def require_success(proc, label):
         raise RuntimeError(f"{label} failed ({proc.returncode}):\n{proc.stdout}")
 
 
+def fault_copy(base, tmp, name):
+    """Copy the pristine archive so each fault is injected into its own tree.
+
+    Copying rather than re-running load is worth an explicit note: `load` takes
+    ~45s on this 1000-article sample, and almost all of it is fsync. DataStore
+    keeps one data file open at a time and fsyncs the file *and* its directory
+    whenever the month changes, while articles arrive in arbitrary date order
+    across 111 month directories — about 2178 fsyncs for 1000 records. Loading
+    once and copying keeps every assertion below identical while taking ~90s off
+    the gate. See T-010 for the loader side of this.
+    """
+    target = Path(tmp) / name
+    shutil.copytree(base, target)
+    return target
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="web-infomall-archive-tools-") as tmp:
-        archive = Path(tmp) / "archive"
-        loaded = run(str(SRC / "load"), str(SAMPLE_DATA), str(archive), "--files", "0")
+        pristine = Path(tmp) / "pristine"
+        loaded = run(str(SRC / "load"), str(SAMPLE_DATA), str(pristine), "--files", "0")
         require_success(loaded, "sample load")
+        archive = fault_copy(pristine, tmp, "index-date")
 
         verified = run(str(SRC / "verify"), str(archive))
         require_success(verified, "verify on a fresh sample archive")
@@ -66,12 +84,12 @@ def main():
         if "has invalid crawl date 20030229" not in invalid_date.stdout:
             raise RuntimeError(f"verify did not report the invalid index date:\n{invalid_date.stdout}")
 
-    check_invalid_record_date()
-    check_invalid_record_payload_size()
+        check_invalid_record_date(fault_copy(pristine, tmp, "record-date"))
+        check_invalid_record_payload_size(fault_copy(pristine, tmp, "record-payload"))
     print("PASS: archive verify success/failure paths and benchmark smoke test")
 
 
-def check_invalid_record_date():
+def check_invalid_record_date(archive):
     """verify has a *second* date check, on the record header rather than the index.
 
     Both exist because the relaxation in 99d97d3 removed calendar validation from
@@ -84,44 +102,34 @@ def check_invalid_record_date():
     Uses its own archive: the index-side case above leaves that one corrupted, and
     a failure has to be attributable to exactly one injected fault.
     """
-    with tempfile.TemporaryDirectory(prefix="web-infomall-record-date-") as tmp:
-        archive = Path(tmp) / "archive"
-        require_success(run(str(SRC / "load"), str(SAMPLE_DATA), str(archive),
-                            "--files", "0"), "sample load")
+    record = sorted((archive / "data").glob("*/data_*.dat"))[0]
+    with record.open("r+b") as data:
+        data.seek(8)  # ArticleRecord.crawl_date
+        data.write(struct.pack("=I", 20030229))
 
-        record = sorted((archive / "data").glob("*/data_*.dat"))[0]
-        with record.open("r+b") as data:
-            data.seek(8)  # ArticleRecord.crawl_date
-            data.write(struct.pack("=I", 20030229))
-
-        result = run(str(SRC / "verify"), str(archive))
-        if result.returncode == 0:
-            raise RuntimeError(f"verify accepted an invalid record date:\n{result.stdout}")
-        # ERROR, matching every other branch in scan_data_file: this one
-        # increments structural_errors and breaks out of the file.
-        if "ERROR: Record at offset 0 has invalid crawl date 20030229" not in result.stdout:
-            raise RuntimeError(f"verify did not report the invalid record date:\n{result.stdout}")
+    result = run(str(SRC / "verify"), str(archive))
+    if result.returncode == 0:
+        raise RuntimeError(f"verify accepted an invalid record date:\n{result.stdout}")
+    # ERROR, matching every other branch in scan_data_file: this one
+    # increments structural_errors and breaks out of the file.
+    if "ERROR: Record at offset 0 has invalid crawl date 20030229" not in result.stdout:
+        raise RuntimeError(f"verify did not report the invalid record date:\n{result.stdout}")
 
 
-def check_invalid_record_payload_size():
+def check_invalid_record_payload_size(archive):
     """A malformed record length must not be conflated with an invalid date."""
-    with tempfile.TemporaryDirectory(prefix="web-infomall-record-payload-") as tmp:
-        archive = Path(tmp) / "archive"
-        require_success(run(str(SRC / "load"), str(SAMPLE_DATA), str(archive),
-                            "--files", "0"), "sample load")
+    record = sorted((archive / "data").glob("*/data_*.dat"))[0]
+    with record.open("r+b") as data:
+        data.seek(28)  # ArticleRecord.record_size
+        original_size = struct.unpack("=I", data.read(4))[0]
+        data.seek(28)
+        data.write(struct.pack("=I", original_size + 1))
 
-        record = sorted((archive / "data").glob("*/data_*.dat"))[0]
-        with record.open("r+b") as data:
-            data.seek(28)  # ArticleRecord.record_size
-            original_size = struct.unpack("=I", data.read(4))[0]
-            data.seek(28)
-            data.write(struct.pack("=I", original_size + 1))
-
-        result = run(str(SRC / "verify"), str(archive))
-        if result.returncode == 0:
-            raise RuntimeError(f"verify accepted an invalid record payload size:\n{result.stdout}")
-        if "Record payload size" not in result.stdout or "does not match record size" not in result.stdout:
-            raise RuntimeError(f"verify did not report the payload mismatch:\n{result.stdout}")
+    result = run(str(SRC / "verify"), str(archive))
+    if result.returncode == 0:
+        raise RuntimeError(f"verify accepted an invalid record payload size:\n{result.stdout}")
+    if "Record payload size" not in result.stdout or "does not match record size" not in result.stdout:
+        raise RuntimeError(f"verify did not report the payload mismatch:\n{result.stdout}")
 
 
 if __name__ == "__main__":
