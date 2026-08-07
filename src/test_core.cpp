@@ -417,6 +417,13 @@ void test_v2_shard_validation_and_legacy_dates(TestContext& test, const std::str
     QueryEngine legacy_query(archive + "/data", index_dir);
     CHECK(test, legacy_query.init());
     const auto legacy_page = legacy_query.get_page(legacy_url);
+    // `valid` defaults to true and means "integrity intact", not "found": every
+    // early return in get_page yields {} with valid == true. Asserting it alone
+    // stays green even when init() fails and nothing is looked up at all — it was
+    // the one assertion here that survived restoring the date rejection while its
+    // four neighbours went red. Check the identity the way every production caller
+    // does, guarding on the URL first.
+    CHECK(test, legacy_page.url == legacy_url);
     CHECK(test, legacy_page.valid);
     CHECK(test, legacy_page.date == 20030229);
     CHECK(test, legacy_page.title == title);
