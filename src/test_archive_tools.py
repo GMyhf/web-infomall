@@ -55,6 +55,14 @@ def main():
         invalid_date = run(str(SRC / "verify"), str(archive))
         if invalid_date.returncode == 0:
             raise RuntimeError(f"verify accepted an invalid index date:\n{invalid_date.stdout}")
+        # Pin the severity, not just the text. verify runs a two-tier scheme —
+        # ERROR for structural_errors that abort a data-file scan, WARNING for
+        # bad_entry_refs that let the scan continue — and the index-side date
+        # check is deliberately the second tier. Asserting only the sentence
+        # lets the tier drift silently, which is exactly how the record-side
+        # branch ended up labelled WARNING while counting as a structural error.
+        if "WARNING: Entry" not in invalid_date.stdout:
+            raise RuntimeError(f"index-side date issue lost its WARNING tier:\n{invalid_date.stdout}")
         if "has invalid crawl date 20030229" not in invalid_date.stdout:
             raise RuntimeError(f"verify did not report the invalid index date:\n{invalid_date.stdout}")
 
@@ -89,7 +97,9 @@ def check_invalid_record_date():
         result = run(str(SRC / "verify"), str(archive))
         if result.returncode == 0:
             raise RuntimeError(f"verify accepted an invalid record date:\n{result.stdout}")
-        if "Record at offset 0 has invalid crawl date 20030229" not in result.stdout:
+        # ERROR, matching every other branch in scan_data_file: this one
+        # increments structural_errors and breaks out of the file.
+        if "ERROR: Record at offset 0 has invalid crawl date 20030229" not in result.stdout:
             raise RuntimeError(f"verify did not report the invalid record date:\n{result.stdout}")
 
 

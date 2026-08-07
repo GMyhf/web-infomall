@@ -335,8 +335,16 @@ static void scan_data_file(const std::string& path,
         if (!valid_crawl_date(hdr.crawl_date)) {
             // Legacy index dates are still serviceable; a record header date is
             // not. Keep this separately visible so an operator does not mistake
-            // a historical-date warning for a malformed record-size failure.
-            fprintf(stderr, "WARNING: Record at offset %lld has invalid crawl date %u in %s\n",
+            // a historical-date failure for a malformed record-size failure.
+            //
+            // ERROR, not WARNING, because severity here is not free-form: this
+            // file uses ERROR for everything counted as a structural_error and
+            // aborting the scan, and WARNING for the index-side checks that
+            // count as bad_entry_refs and continue (see the entry-side date
+            // check). This branch does the former, so it must say the former —
+            // an operator grepping for ERROR would otherwise miss a fault that
+            // stops a whole data file from being verified and fails the run.
+            fprintf(stderr, "ERROR: Record at offset %lld has invalid crawl date %u in %s\n",
                     (long long)offset, hdr.crawl_date, path.c_str());
             stats.structural_errors++;
             break;
