@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Web InfoMall is a Wayback Machine-like historical web page replay system for Chinese news articles (1992–2011, about 13.9 million), based on Peking University Network Lab's Depot architecture. The data source is the [CWIRF 1000万新闻网页数据集](https://www.cwirf.org/).
+Web InfoMall is a Wayback Machine-like historical web page replay system for Chinese news articles (1992–2011, about 14.0 million), based on Peking University Network Lab's Depot architecture. The data source is the [CWIRF 1000万新闻网页数据集](https://www.cwirf.org/).
 
 ## Collaboration scaffold (Claude ⇄ Codex) — read before starting work
 
