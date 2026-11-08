@@ -4,7 +4,9 @@
 
 ## 数据来源
 
-[1000万新闻网页数据集](https://www.cwirf.org/) — 从中国Web信息博物馆保存的历史网页中摘选，涵盖1991-2017年间超过1400万篇新闻。
+[1000万新闻网页数据集](https://www.cwirf.org/)（北京大学计算机系网络所）— 从中国Web信息博物馆保存的历史网页中摘选，涵盖1992–2011年间约1390万篇新闻（已去除重复）。
+
+在线服务：<https://infomall.zhengmao.ltd/>（经成都中转，全球可访问）；校内直连 <http://10.129.81.235:8088>。部署方式见下文“线上部署”。
 
 ## 系统架构
 
@@ -99,7 +101,7 @@ make -C src
 ./src/serve archive/data archive/index 8088 --trusted-proxy-hops 0
 ```
 
-### 加载全量数据（1400万文章）
+### 加载全量数据（约1390万文章）
 
 ```bash
 # 将 TenMillionArticles/dat/ 放到 data_source/ 目录下
@@ -119,6 +121,24 @@ make -C src
 ```
 
 bench 工具从索引中随机抽取 URL 进行查询，测试端到端响应延迟并输出百分位统计。
+
+### 线上部署（jensen + 成都中转）
+
+```
+用户 ─HTTPS─► infomall.zhengmao.ltd（成都 43.136.172.200，Caddy，*.zhengmao.ltd 通配符证书）
+            ─Tailscale─► jensen 100.123.12.92:8088（web-infomall.service）
+校内用户 ─HTTP─► 10.129.81.235:8088（直连）
+```
+
+- **jensen**：systemd 服务 `web-infomall.service`（开机自启，崩溃 5 秒后自动重启），以 `rocky` 身份运行
+  `src/serve /data/web-infomall-archive/data /data/web-infomall-archive/index 8088 --trusted-proxy-hops 1`。
+  日志进 journal：`journalctl -u web-infomall -f`。SELinux 为 Enforcing，`src/serve` 已用
+  `semanage fcontext -t bin_t` 标为可执行；**重新编译后要 `sudo restorecon -v src/serve`**，否则服务起不来。
+- **成都中转**：`/etc/caddy/Caddyfile` 里的 `https://infomall.zhengmao.ltd` 块，`reverse_proxy 100.123.12.92:8088`，
+  访问日志 `/var/log/caddy/infomall-access.log`。域名直连本机、不经 Cloudflare，所以 jensen 侧 `--trusted-proxy-hops 1`；
+  若改走 Cloudflare，要改成 2。
+- **已知取舍**：8088 在校内也能直连，直连的客户端可以伪造 `X-Forwarded-For` 绕过限流（只影响限流，且只在校内）。
+  要消除它，可在 jensen 防火墙上只对 tailnet 开放 8088。
 
 ### Docker 部署
 

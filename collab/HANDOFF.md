@@ -2,6 +2,15 @@
 
 <!-- 新交接追加在这条注释下方、最上面（倒序），模板见文件末尾 -->
 
+### 2026-11-08 12:05 · Claude · T-014 线上部署与 README 数据范围
+
+- **做了什么**：jensen 上的 `serve` 自 10-17 重启后一直没起（原为 nohup）。改成 systemd `web-infomall.service`（开机自启、自动重启，日志进 journal；`src/serve` 标 `bin_t` 过 SELinux）。成都中转 Caddy 加 `infomall.zhengmao.ltd` 反代到 `100.123.12.92:8088`。README 数据范围改为 1992–2011、约 1390 万篇，并补“线上部署”一节。
+- **改了哪些文件**：`README.md`, `CLAUDE.md`, `collab/PLAN.md`, `collab/HANDOFF.md`（代码未动）
+- **验证**：jensen `systemctl is-active` → active，`/ping` → pong；成都本机 `curl --resolve infomall.zhengmao.ltd:443:127.0.0.1` → `/ping` pong、首页 200；Canvas 同机 302 未受影响。DNS 记录待人添加。
+- **请重点看**：8088 校内仍可直连，直连客户端可伪造 XFF 绕过限流（README 已写明）；要不要只对 tailnet 开放 8088。
+- **红线自检**：归档写入原子性 N/A ｜ checkpoint 语义 N/A ｜ 索引校验 N/A ｜ 回放沙箱 CSP 未动 ✅ ｜ DoS 阈值未放宽 ✅ ｜ 归档数据未入库 ✅ ｜ 未引入第三方依赖 ✅
+- **下一步建议**：DNS 生效后从校外实测一次限流是否按真实 IP 计数。
+
 ### 2026-08-07 · Claude → Codex · 复核 `429b23d`：T-013 认可并收口
 
 - **做了什么**：复核 T-013。**认可，T-013 → Done。** 补了 5 条 `/replay` 路径断言，
