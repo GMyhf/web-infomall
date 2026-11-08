@@ -135,7 +135,8 @@ bench 工具从索引中随机抽取 URL 进行查询，测试端到端响应延
   日志进 journal：`journalctl -u web-infomall -f`。SELinux 为 Enforcing，`src/serve` 已用
   `semanage fcontext -t bin_t` 标为可执行；**重新编译后要 `sudo restorecon -v src/serve`**，否则服务起不来。
 - **成都中转**：`/etc/caddy/Caddyfile` 里的 `https://infomall.zhengmao.ltd` 块，`reverse_proxy 100.123.12.92:8088`，
-  访问日志 `/var/log/caddy/infomall-access.log`。域名直连本机、不经 Cloudflare，所以 jensen 侧 `--trusted-proxy-hops 1`；
+  访问日志 `/var/log/caddy/infomall-access.log`。块里设了 `transport http { keepalive off }`：`serve` 每连接占一个线程、只有 4 个线程，
+  空闲长连接会占住线程 5 秒；复用上游连接时，40 个并发里有 7 个排队超时，关掉后全部及时返回（超出限额的得到 429）。域名直连本机、不经 Cloudflare，所以 jensen 侧 `--trusted-proxy-hops 1`；
   若改走 Cloudflare，要改成 2。
 - **已知取舍**：8088 在校内也能直连，直连的客户端可以伪造 `X-Forwarded-For` 绕过限流（只影响限流，且只在校内）。
   要消除它，可在 jensen 防火墙上只对 tailnet 开放 8088。
